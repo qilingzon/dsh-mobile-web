@@ -284,11 +284,14 @@
   }
 
   /* ------------------------------------------------------------------ *
-   * 5. Settings / modal overlays — full screen, nav stacked on top      *
+   * 5. Settings modal overlay — modern mobile card & capsule design    *
    * ------------------------------------------------------------------ *
-   * Measured on a 390px phone before this plugin: the settings panel was
-   * 342px wide but split into a 188px nav + a 154px content column, which
-   * makes every settings form unusable. Stack them instead. */
+   * Replaced the clunky desktop-style split column with an ultra-clean
+   * iOS / Material style layout:
+   *  - Top header with Title + floating circular Close button
+   *  - Horizontal swipeable capsule pills for categories
+   *  - Clean grouped cards with subtle borders & soft elevation
+   *  - Maximize content readability and thumb-friendly touch targets   */
   [class*="_overlay"] > [class*="_panel"] {
     display: flex !important;
     flex-direction: column !important;
@@ -298,6 +301,7 @@
     max-height: 100dvh !important;
     border-radius: 0 !important;
     margin: 0 !important;
+    background: var(--dsw-alias-bg-module-platform, #f6f8fa) !important;
   }
 
   [class*="_overlay"] > [class*="_panel"] > [class*="_nav"] {
@@ -305,21 +309,112 @@
     width: 100% !important;
     max-width: none !important;
     height: auto !important;
-    max-height: 38dvh;
-    overflow: auto !important;
+    max-height: none !important;
+    padding: calc(var(--dsh-mw-safe-t) + 8px) 16px 10px !important;
+    background: var(--dsw-alias-bg-base, #ffffff) !important;
     border-right: none !important;
-    border-bottom: 1px solid rgba(127, 127, 127, .22);
-    padding-top: var(--dsh-mw-safe-t);
-    -webkit-overflow-scrolling: touch;
+    border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(0, 0, 0, .06)) !important;
+    overflow: visible !important;
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 10px !important;
+    box-sizing: border-box !important;
+  }
+
+  [class*="_overlay"] [class*="_navTitle"] {
+    display: flex !important;
+    align-items: center !important;
+    font-size: 20px !important;
+    font-weight: 700 !important;
+    letter-spacing: -0.4px !important;
+    color: var(--dsw-alias-label-primary, #111) !important;
+    margin: 0 !important;
+    padding: 0 2px !important;
+    min-height: 36px !important;
+  }
+
+  [class*="_overlay"] [class*="_navList"] {
+    display: flex !important;
+    flex-direction: row !important;
+    align-items: center !important;
+    gap: 8px !important;
+    overflow-x: auto !important;
+    overflow-y: hidden !important;
+    margin: 0 -16px 0 !important;
+    padding: 2px 16px 4px !important;
+    scrollbar-width: none !important;
+    -webkit-overflow-scrolling: touch !important;
+  }
+  [class*="_overlay"] [class*="_navList"]::-webkit-scrollbar {
+    display: none !important;
+  }
+
+  [class*="_overlay"] [class*="_navList"] button {
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    gap: 6px !important;
+    padding: 6px 14px !important;
+    border-radius: 999px !important;
+    font-size: 13px !important;
+    font-weight: 500 !important;
+    white-space: nowrap !important;
+    flex-shrink: 0 !important;
+    min-height: 32px !important;
+    background: var(--dsw-alias-bg-module-platform, rgba(0, 0, 0, .05)) !important;
+    color: var(--dsw-alias-label-secondary, #666) !important;
+    border: 1px solid var(--dsw-alias-border-l1, rgba(0, 0, 0, .05)) !important;
+    transition: all .16s ease !important;
+  }
+  [class*="_overlay"] [class*="_navList"] button[class*="_active"] {
+    background: var(--dsw-alias-label-primary, #111) !important;
+    color: var(--dsw-alias-label-primary-foreground, #fff) !important;
+    border-color: transparent !important;
+    font-weight: 600 !important;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, .15) !important;
   }
 
   [class*="_overlay"] > [class*="_panel"] > [class*="_content"] {
     flex: 1 1 auto !important;
     width: 100% !important;
     min-width: 0 !important;
-    overflow: auto !important;
-    padding-bottom: var(--dsh-mw-safe-b);
+    overflow-y: auto !important;
+    padding: 12px 14px max(24px, var(--dsh-mw-safe-b)) !important;
+    background: transparent !important;
+    box-sizing: border-box !important;
     -webkit-overflow-scrolling: touch;
+  }
+
+  [class*="_overlay"] [class*="_content"] [class*="_header"] {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: flex-start !important;
+    padding: 0 2px 10px !important;
+    min-height: 0 !important;
+  }
+  [class*="_overlay"] [class*="_content"] [class*="_close"] {
+    position: fixed !important;
+    top: calc(var(--dsh-mw-safe-t) + 8px) !important;
+    right: 14px !important;
+    z-index: 10 !important;
+    width: 32px !important;
+    height: 32px !important;
+    border-radius: 50% !important;
+    background: var(--dsw-alias-bg-module-platform, rgba(0, 0, 0, .05)) !important;
+    border: none !important;
+    color: var(--dsw-alias-label-primary, #111) !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+  }
+
+  [class*="_overlay"] [class*="_content"] [class*="_section"] {
+    background: var(--dsw-alias-bg-base, #fff) !important;
+    border: 1px solid var(--dsw-alias-border-l1, rgba(0, 0, 0, .06)) !important;
+    border-radius: 16px !important;
+    padding: 16px 14px !important;
+    margin-bottom: 14px !important;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, .03) !important;
   }
 
   /* Generic dialogs: never wider than the screen. */
