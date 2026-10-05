@@ -1,0 +1,743 @@
+/* ==========================================================================
+   dsh-mobile-web — full mobile-web adaptation for the DeepSeek Harness console
+   --------------------------------------------------------------------------
+   DESIGN RULE (the "no desktop conflict" guarantee)
+   Every single rule below lives inside the mobile gate. Above the gate this
+   stylesheet contributes exactly nothing, so the desktop console renders
+   bit-identically to a stock install. test/regression.py asserts this by
+   comparing layout metrics against a baseline captured before installation.
+
+   GATE
+   `max-width: 860px` — phones and small tablets in portrait. 860px sits below
+   the app's own ~1000px rail breakpoint, so the two compose rather than fight:
+   the app still owns collapsed/expanded state, we only change geometry.
+   `(max-height: 500px) and (pointer: coarse)` — landscape phones (e.g. a
+   932x430 iPhone), which are wide but short. The `pointer: coarse` half is
+   what keeps a short *desktop* window (mouse = fine pointer) untouched.
+
+   SELECTOR STRATEGY
+   The app uses CSS modules, so class names are `<hash>_<semantic>` (e.g.
+   `pI_x6G_sidebarCol`). Hashes change between builds; the semantic suffix does
+   not. Every selector here therefore matches on the suffix via [class*="_x"],
+   which survives version bumps.
+   ========================================================================== */
+
+@media (max-width: 860px), ((max-height: 500px) and (pointer: coarse)) {
+
+  /* ------------------------------------------------------------------ *
+   * 1. Viewport, safe areas, on-screen keyboard                        *
+   * ------------------------------------------------------------------ */
+  :root {
+    /* Notch / home-indicator insets. Zero on devices without them. */
+    --dsh-mw-safe-t: env(safe-area-inset-top, 0px);
+    --dsh-mw-safe-b: env(safe-area-inset-bottom, 0px);
+    --dsh-mw-safe-l: env(safe-area-inset-left, 0px);
+    --dsh-mw-safe-r: env(safe-area-inset-right, 0px);
+    /* Keyboard height, published by the JS half from visualViewport. */
+    --dsh-mw-kb: 0px;
+    /* Height of the injected navigation bar (safe-area inset is added on top). */
+    --dsh-mw-topbar-h: 52px;
+  }
+
+  html {
+    /* Stop iOS/Android text inflation from breaking every measurement. */
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+  }
+
+  html, body {
+    /* No rubber-band pull-to-refresh chaining into the app shell. */
+    overscroll-behavior-y: none;
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 2. App frame — keep the rail, never let the drawer squeeze content  *
+   * ------------------------------------------------------------------ *
+   * The app writes its geometry inline, e.g.
+   *   closed:  grid-template-columns: 56px  minmax(0px, 1fr) 0px
+   *   open:    grid-template-columns: 280px minmax(0px, 1fr) 0px
+   * On a 390px phone the "open" value crushes the content column to 110px
+   * (and to 40px at 320px). We pin the first track to the rail width so the
+   * content keeps its full width in BOTH states, and the expanded sidebar is
+   * floated over the content by rule 3 instead.
+   *
+   * The inline value stays readable from JS, which is how the behaviour half
+   * detects the open/closed transition. */
+  [class*="_frame"] {
+    box-sizing: border-box !important;
+    height: 100dvh !important;
+    min-height: 100dvh !important;
+  }
+
+  /* The rail-free layout is gated on `html.dsh-mw-on`, which the behaviour half
+     sets only once it has actually built the replacement top bar. If that script
+     ever fails to run, the stock rail stays visible and navigation still works:
+     the failure degrades to "unadapted", never to "no navigation at all". */
+  html.dsh-mw-on [class*="_frame"] {
+    grid-template-columns: 0px minmax(0, 1fr) 0px !important;
+    /* Reserve the top bar's height. The bar is `position: fixed`, so this
+       padding is what keeps the columns from sliding underneath it — no
+       child-height hacks, and inner scroll areas keep working. */
+    padding-top: calc(var(--dsh-mw-topbar-h) + var(--dsh-mw-safe-t)) !important;
+  }
+
+  /* `_frame` is a GENERIC suffix. The ask_user_question card's own frame
+     (`<hash>_frame`) matches the shell rules above too — measured on a live
+     question card at 390x844: it received the shell's 52px top-bar padding and
+     a forced `height: 100dvh`, which shifted the card inside a full-height
+     block and wasted a third of the room the question and its options need.
+     Undo the shell geometry on any frame that is not the app shell. The shell
+     is the only frame containing the sidebar column, and `:has` is ignored by
+     older browsers, which then keep the previous behaviour instead of losing
+     the shell rules. */
+  html.dsh-mw-on [class*="_frame"]:not(:has([class*="_sidebarCol"])) {
+    grid-template-columns: none !important;
+    height: auto !important;
+    min-height: 0 !important;
+    /* The component's own padding is `6px calc(clearance + 16px) 10px`, which
+       left only 296px of a 390px phone for the question text. */
+    padding: 6px 8px 10px !important;
+  }
+
+  /* A phone has to fit a whole question. The stock cap is `min(60vh, 520px)`,
+     and once a long question wrapped, that left ~270px for the options — so
+     option 3 and the descriptions sat below an inner scroll with no visible
+     affordance (reported as "看不到全文"). 86dvh fits one full question. */
+  html.dsh-mw-on [class*="_frame"]:not(:has([class*="_sidebarCol"])) [class*="_card"] {
+    max-height: min(86dvh, 780px) !important;
+  }
+
+  /* Grid children must be allowed to shrink, or long code/URLs blow the
+     column past the viewport and create a horizontal scrollbar. */
+  [class*="_centerCol"],
+  [class*="_rightbarCol"] {
+    min-width: 0 !important;
+    max-width: 100vw;
+  }
+
+  /* Pin each column to its own track.
+     Without this, lifting the sidebar out of flow lets the grid auto-place the
+     remaining children one track to the left — the content column lands in the
+     zero-width track and collapses. Measured, not theorised: centerCol went to
+     exactly 56px on every phone viewport before these lines existed. */
+  [class*="_sidebarCol"]  { grid-column: 1 !important; grid-row: 1 !important; }
+  [class*="_centerCol"]   { grid-column: 2 !important; grid-row: 1 !important; }
+  [class*="_rightbarCol"] { grid-column: 3 !important; grid-row: 1 !important; }
+
+  /* The rail is hidden, but deliberately NOT with `display: none`.
+     The app renders the Settings dialog INSIDE this column (measured: the
+     hidden ancestor of `VOzbGW_overlay` was `pI_x6G_sidebarCol`), so
+     `display: none` here silently killed the whole settings panel — the panel
+     opened and measured 0x0. `visibility` hides the rail while letting that
+     dialog opt back in, and it still leaves the buttons clickable for the top
+     bar (a programmatic .click() fires React's handler regardless). */
+  html.dsh-mw-on [class*="_sidebarCol"] {
+    visibility: hidden !important;
+    width: 0 !important;
+    min-width: 0 !important;
+  }
+  html.dsh-mw-on [class*="_sidebarCol"] [class*="_overlay"] { visibility: visible !important; }
+
+  /* ------------------------------------------------------------------ *
+   * 3. Expanded sidebar becomes an overlay drawer                       *
+   * ------------------------------------------------------------------ *
+   * Closed  -> hidden entirely (rule 2 above); navigation is in the top bar.
+   * Open    -> the app has widened the column; we un-hide it, lift it out of
+   *            the grid, overlay it on the content and add a scrim behind. */
+  html.dsh-mw-drawer [class*="_sidebarCol"] {
+    display: block !important;
+    visibility: visible !important;
+    position: fixed !important;
+    top: 0 !important;
+    bottom: 0 !important;
+    left: 0 !important;
+    width: min(285px, 76vw) !important;
+    height: 100dvh !important;
+    z-index: 70 !important;
+    margin: 0 !important;
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, .06), 0 18px 48px rgba(0, 0, 0, .30);
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+    padding-top: var(--dsh-mw-safe-t);
+    padding-bottom: var(--dsh-mw-safe-b);
+    padding-left: max(6px, var(--dsh-mw-safe-l)) !important;
+    padding-right: 6px !important;
+    animation: dsh-mw-drawer-in .2s cubic-bezier(.22, .61, .36, 1);
+  }
+
+  @keyframes dsh-mw-drawer-in {
+    from { transform: translateX(-14px); opacity: .55; }
+    to   { transform: none; opacity: 1; }
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 3b. Injected top bar — replaces the left rail                       *
+   * ------------------------------------------------------------------ *
+   * Every button drives the app's OWN control (which is still in the DOM,
+   * just hidden), so new-session / search / settings keep the app's real
+   * behaviour and this bar owns no logic beyond forwarding a click.
+   *
+   * `--dsh-mw-surface` is filled in at runtime from the app's own computed
+   * background colour, so the bar matches light AND dark themes without a
+   * hardcoded colour. */
+  .dsh-mw-topbar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 60;
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    box-sizing: border-box;
+    height: calc(var(--dsh-mw-topbar-h) + var(--dsh-mw-safe-t));
+    padding-top: var(--dsh-mw-safe-t);
+    padding-left: max(6px, var(--dsh-mw-safe-l));
+    padding-right: max(6px, var(--dsh-mw-safe-r));
+    background: var(--dsh-mw-surface, #fff);
+    border-bottom: 1px solid rgba(127, 127, 127, .20);
+    -webkit-backdrop-filter: blur(12px);
+    backdrop-filter: blur(12px);
+  }
+
+  /* Push the settings button to the far right. */
+  .dsh-mw-topbar__spacer { flex: 1 1 auto; }
+
+  .dsh-mw-topbar button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    border: 0;
+    border-radius: 12px;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  .dsh-mw-topbar button:active { background: rgba(127, 127, 127, .18); }
+  .dsh-mw-topbar button svg { display: block; pointer-events: none; }
+
+  /* While the drawer is open it provides the navigation, and the scrim dims
+     everything behind it. Leaving the bar visible put a lone settings icon on
+     top of the darkened area — so the bar hides with the rest. */
+  html.dsh-mw-drawer .dsh-mw-scrim { z-index: 55; }
+  html.dsh-mw-drawer .dsh-mw-topbar { visibility: hidden; }
+
+  /* Scrim — created and owned by the JS half. */
+  .dsh-mw-scrim {
+    position: fixed;
+    inset: 0;
+    z-index: 65;
+    background: rgba(0, 0, 0, .42);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity .2s ease;
+    -webkit-tap-highlight-color: transparent;
+  }
+  html.dsh-mw-drawer .dsh-mw-scrim {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 4. Right sidebar — full-screen sheet instead of a squeezed column   *
+   * ------------------------------------------------------------------ */
+  html.dsh-mw-right [class*="_rightbarCol"] {
+    position: fixed !important;
+    inset: 0 !important;
+    width: 100vw !important;
+    max-width: 100vw !important;
+    height: 100dvh !important;
+    z-index: 68 !important;
+  }
+  html.dsh-mw-right [class*="_rightbarCol"] > * {
+    width: 100% !important;
+    max-width: 100vw !important;
+    height: 100dvh !important;
+    padding-top: var(--dsh-mw-safe-t);
+    padding-bottom: var(--dsh-mw-safe-b);
+  }
+
+  /* The app presents a file preview as a fullscreen right panel and puts its
+     own close control (收起右侧边栏) in the top-right corner — the exact spot the
+     injected bar's settings button occupies. Measured: the bar won the hit test
+     (`elementFromPoint` at the close button returned
+     `BUTTON.dsh-mw-topbar__settings`), so opening a file left NO WAY BACK to
+     the conversation. While the app owns the screen fullscreen, the bar yields;
+     the app's own control is the way back. */
+  html.dsh-mw-rightfull .dsh-mw-topbar { visibility: hidden; }
+
+  /* That control is 28px in the app's header. Expand its hit area to the 44px
+     touch minimum with an overlay rather than by resizing it, so the panel
+     header's layout is untouched. */
+  html.dsh-mw-rightfull [class*="_iconButton"] { position: relative; }
+  html.dsh-mw-rightfull [class*="_iconButton"]::after {
+    content: '';
+    position: absolute;
+    inset: -8px;
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 5. Settings / modal overlays — full screen, nav stacked on top      *
+   * ------------------------------------------------------------------ *
+   * Measured on a 390px phone before this plugin: the settings panel was
+   * 342px wide but split into a 188px nav + a 154px content column, which
+   * makes every settings form unusable. Stack them instead. */
+  [class*="_overlay"] > [class*="_panel"] {
+    display: flex !important;
+    flex-direction: column !important;
+    width: 100vw !important;
+    max-width: 100vw !important;
+    height: 100dvh !important;
+    max-height: 100dvh !important;
+    border-radius: 0 !important;
+    margin: 0 !important;
+  }
+
+  [class*="_overlay"] > [class*="_panel"] > [class*="_nav"] {
+    flex: 0 0 auto !important;
+    width: 100% !important;
+    max-width: none !important;
+    height: auto !important;
+    max-height: 38dvh;
+    overflow: auto !important;
+    border-right: none !important;
+    border-bottom: 1px solid rgba(127, 127, 127, .22);
+    padding-top: var(--dsh-mw-safe-t);
+    -webkit-overflow-scrolling: touch;
+  }
+
+  [class*="_overlay"] > [class*="_panel"] > [class*="_content"] {
+    flex: 1 1 auto !important;
+    width: 100% !important;
+    min-width: 0 !important;
+    overflow: auto !important;
+    padding-bottom: var(--dsh-mw-safe-b);
+    -webkit-overflow-scrolling: touch;
+  }
+
+  /* Generic dialogs: never wider than the screen. */
+  [role="dialog"] {
+    max-width: 100vw !important;
+    max-height: 100dvh !important;
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 6. Composer — above the keyboard, clear of the home indicator       *
+   * ------------------------------------------------------------------ */
+  [class*="_composerSeat"],
+  [class*="_composerStack"] {
+    padding-left: max(10px, var(--dsh-mw-safe-l)) !important;
+    padding-right: max(10px, var(--dsh-mw-safe-r)) !important;
+    /* Only the home-indicator inset. The keyboard is NOT compensated here.
+       An earlier revision added `+ var(--dsh-mw-kb)`, which inflated this box
+       instead of lifting it: measured at 390x844, the seat went from 275px tall
+       at y=311 to 875px tall at y=11 with 300px of bottom padding — the
+       composer drifted into the middle of the screen with a large empty gap
+       below it, exactly as reported on-device. The viewport meta now declares
+       `interactive-widget=resizes-content`, so the browser shrinks the layout
+       viewport itself and the app's own 100dvh frame does the right thing. */
+    padding-bottom: var(--dsh-mw-safe-b) !important;
+  }
+
+  /* iOS Safari zooms the whole page when a field under 16px receives focus.
+     Forcing 16px is the standard fix and is why this is !important. */
+  input,
+  textarea,
+  select,
+  [contenteditable="true"],
+  [class*="_input"] {
+    font-size: 16px !important;
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 7. Content — nothing may overflow the viewport sideways             *
+   * ------------------------------------------------------------------ *
+   * `overflow-x: clip`, NEVER `overflow-x: hidden`, on anything that is
+   * not already a scroll container.
+   *
+   * CSS Overflow 3: when one axis is `visible` and the other is neither
+   * `visible` nor `clip`, the `visible` axis is forced to compute to
+   * `auto`. `_body` is the app's plain non-scrolling flex wrapper
+   * (`overflow: visible`), so `overflow-x: hidden` silently promoted its
+   * `overflow-y` to `auto` — making `_body` a SECOND scroll container
+   * nested inside the app's real one, `_scrollBody`. Two nested touch
+   * scrollers with `overscroll-behavior: contain` on both is what made
+   * conversation panning intermittent.
+   *
+   * Measured on the live console, 390x844, one long transcript, six
+   * CDP touch swipes of 370px each, reading scrollTop before/after:
+   *
+   *   rule as `hidden`  _body overflow-y=auto    3/6 swipes moved 0px
+   *                     (deltas: 0, +40, -355, -355, 0, 0)
+   *   rule as `clip`    _body overflow-y=visible 6/6 swipes moved -355px
+   *   rule removed      _body overflow-y=visible 6/6 swipes moved -355px
+   *
+   * `clip` contains the sideways overflow without creating a scroll
+   * container, so `_body` keeps `overflow-y: visible` and the app's own
+   * scroller stays the only one in the chain.
+   *
+   * `_scrollBody` is deliberately NOT overridden any more: the app already
+   * gives it `overflow-x: auto`, and forcing `hidden` there turned wide
+   * code blocks and tables into clipped, unreachable content. */
+  [class*="_centerCol"] [class*="_body"] {
+    max-width: 100vw;
+    overflow-x: clip !important;
+  }
+
+  /* Keep the app's scroller from chaining its overscroll into the page.
+     This is the one declaration here that is safe on a real scroller. */
+  [class*="_scrollBody"] {
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  /* Code, tables and other intrinsically wide blocks scroll inside
+     themselves rather than stretching the page. */
+  pre,
+  table,
+  code,
+  [class*="_code"] {
+    max-width: 100% !important;
+  }
+  pre,
+  table {
+    overflow-x: auto !important;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  img,
+  video,
+  canvas {
+    max-width: 100% !important;
+    height: auto;
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 8. Touch ergonomics                                                 *
+   * ------------------------------------------------------------------ *
+   * 44px is the iOS HIG / Material minimum. Applied to the persistent
+   * navigation surfaces (rail, drawer, settings nav) where a mis-tap is
+   * costly. The composer toolbar is deliberately left dense — it is a
+   * tightly packed row by design and inflating it would wrap the layout. */
+  [class*="_sidebarCol"] button,
+  [class*="_sidebarCol"] [role="button"],
+  [class*="_sidebarCol"] a {
+    min-height: 44px;
+  }
+  [class*="_sidebarCol"] [class*="_iconButton"],
+  [class*="_sidebarCol"] [class*="_toggle"] {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  [class*="_overlay"] > [class*="_panel"] > [class*="_nav"] button,
+  [class*="_overlay"] > [class*="_panel"] > [class*="_nav"] [role="button"] {
+    min-height: 44px;
+  }
+
+  /* Kill the 300ms double-tap-zoom delay on every control, and stop long-press
+     from selecting button labels. */
+  button,
+  a,
+  [role="button"],
+  [class*="_trigger"],
+  [class*="_seat"],
+  [class*="_tab"] {
+    touch-action: manipulation;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 9. Session list rows inside the drawer                              *
+   * ------------------------------------------------------------------ */
+  html.dsh-mw-drawer [class*="_listArea"] {
+    max-height: none !important;
+    overflow-y: auto !important;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  /* The workspaces header is sized by the app for its 28px icon buttons:
+     `_searchSlot` is capped at 28px and `_headerActions` is a fixed 60px with
+     `overflow: hidden`. Section 8 then grows every icon button to the 44px
+     touch minimum, so the third control — 添加工作区 (new workspace) — no
+     longer fits: it was clipped to a ~12px sliver at the drawer's edge and the
+     list root covered its centre (measured: `elementFromPoint` at the button
+     centre returned `DIV.bhn1Oq_root`). "New workspace" was therefore
+     unreachable from the sidebar on a phone, while the same control in the
+     hero's 选择工作区 popover still worked. Re-flow the header for 44px
+     controls: the search slot takes the free space and right-aligns its icon,
+     and the actions row sizes to its two buttons. Desktop is untouched — this
+     is inside `html.dsh-mw-drawer`, which only exists under the gate. */
+  html.dsh-mw-drawer [class*="_sectionHeader"] {
+    overflow: visible !important;
+  }
+  html.dsh-mw-drawer [class*="_sectionHeader"] [class*="_searchSlot"] {
+    max-width: none !important;
+    margin-left: 0 !important;
+    justify-content: flex-end !important;
+  }
+  html.dsh-mw-drawer [class*="_sectionHeader"] [class*="_searchButton"] {
+    min-width: 44px !important;
+  }
+  html.dsh-mw-drawer [class*="_sectionHeader"] [class*="_headerActions"] {
+    width: auto !important;
+    max-width: none !important;
+    flex: 0 0 auto !important;
+    overflow: visible !important;
+  }
+
+  /* Per-row action menus are HOVER-ONLY in the app:
+   *   .YDXeBa_sessionRow:hover .YDXeBa_rowActions,
+   *   .YDXeBa_sessionRow.YDXeBa_menuOpen .YDXeBa_rowActions { display: inline-flex }
+   * A touch screen has no hover, and the trigger lives *inside* the container
+   * it reveals, so it can never be tapped into existence. The entire per-row
+   * menu was therefore unreachable on a phone — for a session: 重命名 /
+   * 分叉会话 / **归档会话**; for a workspace: rename / delete / new session.
+   * That is a real feature loss, not a cosmetic one, and it is invisible to a
+   * desktop test run because a mouse reproduces the hover for free.
+   *
+   * Mirror the app's own hover state permanently. Descendant (not `>`) to
+   * match the shape of the app's own selectors, so a markup change to the
+   * wrapping element does not silently break reachability again. */
+  html.dsh-mw-on [class*="_sessionRow"] [class*="_rowActions"],
+  html.dsh-mw-on [class*="_projectRow"] [class*="_rowActions"] {
+    display: inline-flex !important;
+  }
+
+  /* In mobile session rows, show only the essential '⋯' menu trigger and
+     hide redundant inline pin/archive icons, giving the session title maximal
+     horizontal room to be fully readable. */
+  html.dsh-mw-on [class*="_sessionRow"] {
+    padding: 0 6px !important;
+    gap: 4px !important;
+  }
+  html.dsh-mw-on [class*="_sessionRow"] [class*="_title"] {
+    flex: 1 1 auto !important;
+    min-width: 0 !important;
+  }
+  html.dsh-mw-on [class*="_sessionRow"] [class*="_rowActions"] {
+    gap: 2px !important;
+    margin-left: auto !important;
+  }
+  html.dsh-mw-on [class*="_sessionRow"] [class*="_rowActions"] > :not(:first-child) {
+    display: none !important;
+  }
+  html.dsh-mw-drawer [class*="_sessionRow"] [class*="_iconButton"],
+  html.dsh-mw-drawer [class*="_projectRow"] [class*="_iconButton"] {
+    width: 32px !important;
+    min-width: 32px !important;
+    height: 32px !important;
+    min-height: 32px !important;
+  }
+  html.dsh-mw-on [class*="_sessionRow"] [class*="_time"] {
+    font-size: 11px !important;
+    margin-right: 2px !important;
+    flex-shrink: 0 !important;
+  }
+
+  /* The app hides the timestamp while a row's actions are showing
+     (`.YDXeBa_sessionRow:hover .YDXeBa_time { display: none }`). On touch the
+     actions are always showing, so following that rule would delete the
+     relative time from every row on the phone. Keep it, and let the title
+     ellipsise instead — the menu costs width, not information. */
+
+  /* Rows are 32px tall in the app. That is under the 44px touch minimum for
+     the row itself, and it is also shorter than the 44px action button that
+     section 8 forces — so with the actions now visible the button would
+     overflow the row and overlap its neighbour. Grow the rows to fit both. */
+  html.dsh-mw-drawer [class*="_sessionRow"],
+  html.dsh-mw-drawer [class*="_projectRow"] {
+    min-height: 44px;
+  }
+
+  /* Manual reordering is HTML5 drag-and-drop in the app, which a touch screen
+     never initiates; the JS half re-dispatches the app's own drag events from a
+     long press. These two declarations are what let that long press be a drag
+     instead of a text selection / native callout. */
+  html.dsh-mw-on [class*="_sessionRow"],
+  html.dsh-mw-on [class*="_projectRow"] {
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  /* While a reorder drag is live the list must not scroll under the finger. */
+  html.dsh-mw-dragging [class*="_listArea"] {
+    overflow: hidden !important;
+  }
+  /* Long-press feedback: the row subtly scales while the 280 ms timer runs,
+     so the user knows the gesture was recognised before the drag starts. */
+  html.dsh-mw-drawer .dsh-mw-pressing {
+    transform: scale(.98);
+    transition: transform .18s ease;
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 10. Touch hit areas — keep the app's density, grow the target       *
+   * ------------------------------------------------------------------ *
+   * The app renders its conversation and composer controls at 28px (and the
+   * send button at 34px). Inflating them visually would re-flow rows the app
+   * lays out tightly — the reason the composer was left dense on purpose. But
+   * 28px is well under the 44px touch minimum, and a phone user taps these
+   * constantly: message 复制 / 好的回答 / 有问题的回答 / 在新对话中分支, the
+   * header's 更多操作 and 打开右侧边栏, and the composer's attach / model /
+   * permission / send controls.
+   *
+   * A transparent `::after` overlay grows the *hit* area without touching
+   * layout — the same technique already used for the right-sidebar close
+   * control. Insets are chosen against the measured gaps so expanded targets
+   * only ever touch, never overlap:
+   *
+   *   message actions + header corner   28px box, 8px apart  -> -8px / -4px
+   *   composer toolbar                  28px box, 12px apart -> -8px / -5px
+   *   composer send                     34px box, 12px apart -> -5px / -6px
+   *
+   * That yields 36x44 and 38x44 targets: the 44px dimension is the one that
+   * matters for a thumb, and the width stays inside the app's own spacing. */
+  html.dsh-mw-on [class*="_actions"] > [class*="_action"],
+  html.dsh-mw-on [class*="_headerCorner"] button,
+  html.dsh-mw-on [class*="_moreButton"],
+  html.dsh-mw-on [class*="_composerSeat"] button[class*="_add"],
+  html.dsh-mw-on [class*="_composerSeat"] button[class*="_primary"],
+  html.dsh-mw-on [class*="_composerSeat"] button[class*="_trigger"] {
+    position: relative;
+  }
+  html.dsh-mw-on [class*="_actions"] > [class*="_action"]::after,
+  html.dsh-mw-on [class*="_headerCorner"] button::after,
+  html.dsh-mw-on [class*="_moreButton"]::after {
+    content: '';
+    position: absolute;
+    inset: -8px -4px;
+  }
+  html.dsh-mw-on [class*="_composerSeat"] button[class*="_add"]::after,
+  html.dsh-mw-on [class*="_composerSeat"] button[class*="_trigger"]::after {
+    content: '';
+    position: absolute;
+    inset: -8px -5px;
+  }
+  html.dsh-mw-on [class*="_composerSeat"] button[class*="_primary"]::after {
+    content: '';
+    position: absolute;
+    inset: -5px -6px;
+  }
+
+  /* A workspace row is a FOLDER, but the app only reveals the expand/collapse
+     chevron on `:hover` (`.YDXeBa_projectRow:hover .YDXeBa_chevron`), so on a
+     touch screen the row gave no sign that it opens. Mirror the chevron — the
+     folder icon stays, and the app's own `_arrowOpen` state still shows whether
+     the folder is expanded or collapsed. */
+  html.dsh-mw-on [class*="_projectRow"] [class*="_chevron"] {
+    display: inline-flex !important;
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 11. Full-screen modal / overlay sheets (insights panel etc.)       *
+   * ------------------------------------------------------------------ *
+   * On mobile, full-screen overlay panels (such as insights-kit) have
+   * their header/tabs and close control pushed down so they are not
+   * clipped behind the injected 52px top bar.                          */
+  div[style*="z-index: 9999"],
+  div[style*="z-index:9999"] {
+    padding-top: calc(var(--dsh-mw-topbar-h) + var(--dsh-mw-safe-t)) !important;
+    box-sizing: border-box !important;
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 12. Compact Session Header & Tabs for Maximum Reading Area        *
+   * ------------------------------------------------------------------ */
+  html.dsh-mw-on [class*="_header"] {
+    min-height: 0 !important;
+    padding: 4px 10px 4px 10px !important;
+  }
+  html.dsh-mw-on [class*="_titleRow"] {
+    min-height: 28px !important;
+  }
+  html.dsh-mw-on [class*="_tabs"] {
+    gap: 14px !important;
+    margin-top: 2px !important;
+    padding-left: 2px !important;
+    overflow-x: auto !important;
+    scrollbar-width: none !important;
+    -webkit-overflow-scrolling: touch;
+  }
+  html.dsh-mw-on [class*="_tabs"]::-webkit-scrollbar {
+    display: none;
+  }
+  html.dsh-mw-on [class*="_tab"] {
+    padding: 0 2px 4px !important;
+    font-size: 13px !important;
+    white-space: nowrap !important;
+  }
+  html.dsh-mw-on [class*="_scroll"] {
+    padding: 8px 10px !important;
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 13. Mobile Header Utilities & Badge Polish                         *
+   * ------------------------------------------------------------------ *
+   * The pending changes entry in mobile header utilities should display
+   * cleanly without an oversized black badge blocking adjacent icons.  */
+  html.dsh-mw-on [class*="_headerEntry"] {
+    position: relative !important;
+    overflow: visible !important;
+  }
+  html.dsh-mw-on [class*="_headerEntryCount"] {
+    top: -4px !important;
+    right: -6px !important;
+    min-width: 15px !important;
+    height: 15px !important;
+    padding: 0 3px !important;
+    font-size: 10px !important;
+    line-height: 15px !important;
+    border-radius: 8px !important;
+    background-color: var(--dsw-alias-state-business-primary, #2563eb) !important;
+    color: #fff !important;
+    box-shadow: 0 0 0 1.5px var(--dsw-alias-bg-base, #fff) !important;
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 14. Diff Approval Panel (Pending Changes) Mobile Ergonomics        *
+   * ------------------------------------------------------------------ *
+   * The floating diff approval panel sits below the mobile top bar so
+   * its header and close button (×) are completely visible and easy to
+   * tap, allowing one-click return to the conversation.                */
+  html.dsh-mw-on [data-diff-approval-panel] {
+    top: calc(var(--dsh-mw-topbar-h) + var(--dsh-mw-safe-t) + 6px) !important;
+    bottom: max(12px, var(--dsh-mw-safe-b)) !important;
+    left: max(6px, var(--dsh-mw-safe-l)) !important;
+    right: max(6px, var(--dsh-mw-safe-r)) !important;
+    box-shadow: 0 12px 36px rgba(0, 0, 0, 0.25) !important;
+  }
+  html.dsh-mw-on [data-diff-approval-panel] > header {
+    min-height: 48px !important;
+    padding: 8px 12px !important;
+    background: var(--dsw-alias-bg-layer-2, var(--dsw-alias-bg-base)) !important;
+    border-bottom: 1px solid var(--dsw-alias-border-l2) !important;
+  }
+  html.dsh-mw-on [data-diff-approval-close] {
+    min-width: 36px !important;
+    min-height: 36px !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    border-radius: 8px !important;
+    background: var(--dsw-alias-interactive-bg-hover, rgba(0, 0, 0, 0.06)) !important;
+  }
+}
+
+/* ---------------------------------------------------------------------- *
+ * Forced mode was removed                                              *
+ * ---------------------------------------------------------------------- *
+ * An earlier revision exposed `html.dsh-mw-force` so the mobile layout could
+ * be previewed at a desktop size. It duplicated the whole gate, and after the
+ * rail-free rework that duplication was a second source of truth that had
+ * already drifted. The test suite drives real mobile viewports through
+ * Playwright instead, so the copy bought nothing and was deleted. */
+
