@@ -6,10 +6,21 @@
 
 本插件为 DSH Profile 插件：包含一个 Host 侧空操作占位，以及一个向浏览器注入视口门禁样式表和轻量行为控制的前端 Bundle。**不侵入、不篡改 DSH 任何核心源码文件**。
 
-```sh
-dsh plugin --profile web add file:/root/dsh/1/dsh-mobile-web
-# 然后重启 dsh web
+## 🚀 一键部署与更新 (One-line Install & Update)
+
+只需在服务器终端中执行以下一行命令，即可**自动克隆源码、编译产物、注册挂载到 Profile 并平滑重启生效**：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/qilingzon/dsh-mobile-web/main/install.sh | bash
 ```
+
+> **提示**：
+> * 该命令既支持**首次全新安装**，也支持后续**一键覆盖更新**（会自动拉取最新提交并重载）。
+> * 如果网络无法直连 GitHub，也可以先克隆后在本地执行：
+>   ```bash
+>   git clone https://github.com/qilingzon/dsh-mobile-web.git /root/dsh/1/dsh-mobile-web
+>   bash /root/dsh/1/dsh-mobile-web/install.sh
+>   ```
 
 ---
 

@@ -6,9 +6,12 @@ touching the desktop layout**.
 A DSH profile plugin: one host no-op plus one browser bundle that injects a
 gated stylesheet and a small behaviour layer. It patches no DSH source file.
 
-```
-dsh plugin --profile web add file:/root/dsh/1/dsh-mobile-web
-# then restart dsh web
+## 🚀 One-line Install & Update
+
+Run this single command to clone, build, mount to profile and smoothly restart the service automatically:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/qilingzon/dsh-mobile-web/main/install.sh | bash
 ```
 
 ---
