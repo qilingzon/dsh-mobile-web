@@ -6,21 +6,109 @@
 
 本插件为 DSH Profile 插件：包含一个 Host 侧空操作占位，以及一个向浏览器注入视口门禁样式表和轻量行为控制的前端 Bundle。**不侵入、不篡改 DSH 任何核心源码文件**。
 
-## 🚀 一键部署与更新 (One-line Install & Update)
+---
 
-只需在服务器终端中执行以下一行命令，即可**自动克隆源码、编译产物、注册挂载到 Profile 并平滑重启生效**：
+## 快速安装与使用指南
+
+根据您的服务器网络环境与使用习惯，推荐以下三种安装/使用方式：
+
+### 方式一：一键自动安装与更新（推荐，全自动）
+
+在部署了 DeepSeek Harness 的服务器终端中执行以下命令，脚本将自动完成代码克隆/更新、依赖打包、挂载到 web Profile 并平滑重启生效：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/qilingzon/dsh-mobile-web/main/install.sh | bash
 ```
 
-> **提示**：
-> * 该命令既支持**首次全新安装**，也支持后续**一键覆盖更新**（会自动拉取最新提交并重载）。
-> * 如果网络无法直连 GitHub，也可以先克隆后在本地执行：
->   ```bash
->   git clone https://github.com/qilingzon/dsh-mobile-web.git /root/dsh/1/dsh-mobile-web
->   bash /root/dsh/1/dsh-mobile-web/install.sh
->   ```
+> **说明**：
+> * 首次执行为全新安装；后续任意时刻再次执行该命令，即为**一键平滑升级至最新版本**。
+> * 脚本会自动识别运行中的 `dsh web` 进程并进行无损重载，不会影响后台运行中的 Agent 会话。
+
+---
+
+### 方式二：使用 GitHub Release 发行包（离线 / 生产版本锁定）
+
+若服务器无法直接连接 GitHub，或生产环境需要严格锁定稳定版本（免去构建环境），可使用正式发布的 Release 作品包（`.tgz`）：
+
+1. **下载发行包**：
+   从 [Releases 页面](https://github.com/qilingzon/dsh-mobile-web/releases) 下载最新发行作品（例如 `dsh-mobile-web-1.0.0.tgz`）。
+   ```bash
+   wget https://github.com/qilingzon/dsh-mobile-web/releases/download/v1.0.0/dsh-mobile-web-1.0.0.tgz
+   ```
+
+2. **通过 DSH 插件命令直接安装**：
+   ```bash
+   dsh plugin --profile web add ./dsh-mobile-web-1.0.0.tgz
+   ```
+
+3. **重载生效**：
+   重启或重载 `dsh web` 服务即可生效：
+   ```bash
+   # 重启 dsh web 进程
+   pkill -f "dsh web" && nohup dsh web >/dev/null 2>&1 &
+   ```
+
+---
+
+### 方式三：开发者源码安装与本地二次开发
+
+如果您需要修改样式或调整移动端逻辑：
+
+1. **克隆仓库**：
+   ```bash
+   git clone https://github.com/qilingzon/dsh-mobile-web.git
+   cd dsh-mobile-web
+   ```
+
+2. **修改源码并构建打包**：
+   源码位于 `src/` 目录下（`mobile.css` 与 `mobile.js`）。修改完成后执行构建命令：
+   ```bash
+   node build.mjs          # 将 src/ 源码编译合并至 lib/client.js
+   node build.mjs --check  # 验证编译产物是否为最新
+   node test/contract.mjs  # 运行 63 项移动端门禁静态契约测试
+   ```
+
+3. **本地挂载插件**：
+   ```bash
+   dsh plugin --profile web add "file:$(pwd)"
+   ```
+
+4. **同步至 Profile**（如需即时物化覆盖）：
+   ```bash
+   mkdir -p ~/.dsh/profiles/web/node_modules/dsh-mobile-web
+   cp -a . ~/.dsh/profiles/web/node_modules/dsh-mobile-web/
+   ```
+
+---
+
+## 手机端使用说明
+
+插件安装并重启 DSH 后，**桌面端（电脑浏览器）完全保持官方原生样式不变**，仅在手机浏览器访问时自动激活以下体验：
+
+1. **进入控制台**：
+   * 手机浏览器打开 DSH Web 地址，顶部将自动呈现专为触屏设计的毛玻璃导航栏；
+   * 左侧侧边栏已优化为浮层抽屉，点击左上角菜单图标即可滑出，点击空白处自动收起；
+   * 会话列表支持侧滑手势，点击会话时不再误触发手机软键盘。
+
+2. **阅读长表格与对比数据**：
+   * 对话中的 Markdown 对比表格已适配移动端自适应排版，单元格内容自然折行；
+   * 多列表格可直接在手机屏幕上**横向滑动**浏览完整列，文字零重叠、零遮挡。
+
+3. **移动端设置面板**：
+   * 点击设置进入全新卡片化设置界面，横向滑动顶部胶囊标签切换设置分类；
+   * 点击右上角微悬浮关闭按钮随时返回对话。
+
+---
+
+## 卸载方式
+
+如需彻底移除移动端适配插件：
+
+```bash
+dsh plugin --profile web remove dsh-mobile-web
+```
+
+随后重启 `dsh web` 即可，页面刷新后完全恢复 DSH 原生样式。
 
 ---
 
@@ -37,13 +125,12 @@ curl -fsSL https://raw.githubusercontent.com/qilingzon/dsh-mobile-web/main/insta
 | **切换会话交互** | 每次点击会话切换，系统都会**强制弹出手机软键盘**遮挡屏幕 | **智能拦截强制聚焦**，切会话看历史清爽秒开，不误弹输入法 |
 | **底栏 `+` 命令菜单** | 点击唤出菜单的同时**误拉起软键盘**，再点一次无法收起 | **防误触手势优化**：展开不唤起键盘，再次点击或点击外部空白瞬间收起 |
 | **会话顶部 Header 与 Tab** | 强制锁定 76px 最小高度与 36px 超大间隙，挤占对话面积 | **极简紧凑化**：间隙压缩并支持触屏横滑，归还 50px+ 纵向阅读面积 |
+| **Markdown 对比表格** | 强制不换行，多列表格文字互相重叠覆盖乱码 | **自适应折行与横向顺畅滑动**，列宽独立清晰 |
 | **代码审阅面板 (Pending changes)** | 顶部被移动端顶栏遮挡，**找不到关闭按钮（×），进得去出不来** | **界面下移避让**，右上角大号关闭按钮清晰可见，支持手机手势侧滑返回，退出不误弹输入法 |
 | **设置面板 (Settings)** | 粗糙的竖向列表堆叠，吃掉大半个屏幕且关闭按钮错位 | **现代移动端胶囊与卡片设计**：横向轻滑胶囊切换分类，右上角微悬浮关闭圆钮，优雅大气 |
 | **软键盘弹出表现** | 软键盘弹出时直接遮挡住输入框与底部操作条 | 输入框贴合软键盘升起，始终保持在视口可见区域 |
 | **输入框字体大小** | 字体 <16px 触发 iOS Safari 强行整体放大页面 | 规范为 16px，彻底杜绝 iOS 自动放大导致的页面移位 |
 | **导航触控热区** | 大量原生图标仅 28px，极易误触 | 全部扩展至符合 iOS/Android HIG 规范的 **≥44px** 舒适触控尺寸 |
-| **文件夹 / 工作区折叠** | 手机点击工作区直接误关闭抽屉，打不开文件夹 | 点击正常就地展开/折叠文件夹，抽屉稳定保持开启 |
-| **边缘手势滑动** | 原版侧滑手势因底层样式规则失效 | 重新实现基于阈值的移动端顺滑侧滑抽屉拉出/关闭手势 |
 
 ---
 
@@ -57,55 +144,3 @@ curl -fsSL https://raw.githubusercontent.com/qilingzon/dsh-mobile-web/main/insta
    展开/收起侧边栏、打开设置、新建会话均通过触发原生 DOM 控件执行，插件仅监听原生状态并做响应式几何重构，不维护两套割裂的状态逻辑。
 3. **针对安装前基线的像素级回归比对**：
    自动化测试套件持续针对 900px、1024px、1280px、1440px 桌面端视口对比安装前后的关键指标，保证桌面端渲染完全一致。
-
----
-
-## 架构与工作原理
-
-### 1. 响应式布局自适应
-DSH 原生在 Frame 节点上以内联样式硬编码网格分栏：
-```
-关闭侧边栏: grid-template-columns: 56px  minmax(0px, 1fr) 0px
-展开侧边栏: grid-template-columns: 280px minmax(0px, 1fr) 0px
-```
-在 390px 宽的手机屏幕上，280px 会把内容挤压得只剩 110px。插件通过样式重写在两种状态下将第一栏重置为 0px，让内容列始终独占屏幕；行为脚本监听到展开时，将侧边栏提升为带有平滑入场动画和暗色背景遮罩的 `fixed` 悬浮抽屉。
-
-### 2. 移动端固定顶栏 (Top Bar)
-原生的 56px 侧边栏按钮（新会话、搜索、设置等）在手机端使用 `visibility: hidden` 隐藏（不能用 `display: none`，否则会意外销毁挂载在侧边栏内部的设置弹窗树）。顶部自适应注入高 52px 的毛玻璃导航条，按钮点击会无缝代理至原生控件。
-
-### 3. CSS Modules 弹性选择器策略
-DSH 采用 CSS Modules 构建，类名形如 `pI_x6G_sidebarCol`，前面的哈希值随版本编译变化，但语义后缀不变。本插件的选择器全部基于属性模糊匹配 `[class*="_sidebarCol"]`、`[class*="_composerSeat"]`、`[class*="_sessionRow"]` 等，具备极强的跨版本兼容韧性。
-
----
-
-## 目录结构
-
-```
-src/mobile.css    样式表核心 —— 移动端响应式排版与样式规则 (Source of truth)
-src/mobile.js     行为交互脚本 —— 键盘高度监听、抽屉状态、返回手势、输入法防误弹拦截
-build.mjs         构建脚本 —— 将 CSS 与 JS 安全打包至 lib/client.js
-lib/index.js      Host 侧插件入口 (占位)
-lib/client.js     最终分发给浏览器的客户端 Bundle
-test/contract.mjs 静态契约测试 —— 验证语法、门禁与安全规则
-test/e2e.py       Playwright 端到端测试套件
-```
-
-## 重新编译
-
-修改 `src/` 源码后，执行构建：
-
-```sh
-node build.mjs          # 编译 lib/client.js
-node build.mjs --check  # 校验当前编译产物是否为最新
-```
-
----
-
-## 卸载
-
-```sh
-dsh plugin --profile web remove dsh-mobile-web
-# 然后重启 dsh web 服务
-```
-
-卸载后 Profile 依赖将自动清除，注入的样式和脚本会随页面刷新彻底消失，恢复原生样式。
