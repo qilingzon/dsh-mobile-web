@@ -496,15 +496,34 @@
   /* Code, tables and other intrinsically wide blocks scroll inside
      themselves rather than stretching the page. */
   pre,
-  table,
   code,
   [class*="_code"] {
     max-width: 100% !important;
   }
-  pre,
-  table {
+  pre {
     overflow-x: auto !important;
     -webkit-overflow-scrolling: touch;
+  }
+
+  /* Tables in Markdown: must scroll horizontally inside their wrapper,
+     cells must wrap text naturally and NEVER inherit white-space: nowrap. */
+  [class*="_tableScroll"] {
+    max-width: 100% !important;
+    overflow-x: auto !important;
+    -webkit-overflow-scrolling: touch !important;
+    white-space: normal !important;
+  }
+  [class*="_tableScroll"] table {
+    width: max-content !important;
+    max-width: none !important;
+    white-space: normal !important;
+  }
+  [class*="_tableScroll"] th,
+  [class*="_tableScroll"] td {
+    white-space: normal !important;
+    word-break: break-word !important;
+    min-width: 110px !important;
+    max-width: min(75vw, 320px) !important;
   }
 
   img,
@@ -544,7 +563,8 @@
   [role="button"],
   [class*="_trigger"],
   [class*="_seat"],
-  [class*="_tab"] {
+  [class*="_tabs"] > button,
+  [class*="_tabs"] > [role="tab"] {
     touch-action: manipulation;
     -webkit-user-select: none;
     user-select: none;
@@ -765,7 +785,9 @@
   html.dsh-mw-on [class*="_tabs"]::-webkit-scrollbar {
     display: none;
   }
-  html.dsh-mw-on [class*="_tab"] {
+  html.dsh-mw-on [class*="_tabs"] > button,
+  html.dsh-mw-on [class*="_tabs"] > [role="tab"],
+  html.dsh-mw-on [class*="_tabs"] > * {
     padding: 0 2px 4px !important;
     font-size: 13px !important;
     white-space: nowrap !important;
