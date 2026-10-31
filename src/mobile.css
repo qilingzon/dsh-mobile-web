@@ -4,8 +4,9 @@
    DESIGN RULE (the "no desktop conflict" guarantee)
    Every single rule below lives inside the mobile gate. Above the gate this
    stylesheet contributes exactly nothing, so the desktop console renders
-   bit-identically to a stock install. test/regression.py asserts this by
-   comparing layout metrics against a baseline captured before installation.
+   bit-identically to a stock install. test/e2e.py asserts this by comparing
+   layout metrics against before-metrics.json, captured from the live console
+   with test/capture-baseline.py.
 
    GATE
    `max-width: 860px` — phones and small tablets in portrait. 860px sits below
@@ -36,7 +37,7 @@
     /* Keyboard height, published by the JS half from visualViewport. */
     --dsh-mw-kb: 0px;
     /* Height of the injected navigation bar (safe-area inset is added on top). */
-    --dsh-mw-topbar-h: 52px;
+    --dsh-mw-topbar-h: 44px;
   }
 
   html {
@@ -188,12 +189,12 @@
     z-index: 60;
     display: flex;
     align-items: center;
-    gap: 2px;
+    gap: 4px;
     box-sizing: border-box;
     height: calc(var(--dsh-mw-topbar-h) + var(--dsh-mw-safe-t));
     padding-top: var(--dsh-mw-safe-t);
-    padding-left: max(6px, var(--dsh-mw-safe-l));
-    padding-right: max(6px, var(--dsh-mw-safe-r));
+    padding-left: max(8px, var(--dsh-mw-safe-l));
+    padding-right: max(8px, var(--dsh-mw-safe-r));
     background: var(--dsh-mw-surface, #fff);
     border-bottom: 1px solid rgba(127, 127, 127, .20);
     -webkit-backdrop-filter: blur(12px);
@@ -226,14 +227,26 @@
   /* While the drawer is open it provides the navigation, and the scrim dims
      everything behind it. Leaving the bar visible put a lone settings icon on
      top of the darkened area — so the bar hides with the rest. */
-  html.dsh-mw-drawer .dsh-mw-scrim { z-index: 55; }
-  html.dsh-mw-drawer .dsh-mw-topbar { visibility: hidden; }
+  /* While the drawer is open the sidebar covers the bar's left side (z-index
+     70 vs 60). The bar itself stays visible: it used to be `visibility:
+     hidden` here, which meant any stuck drawer state took every navigation
+     control off a real phone at once. */
+  html.dsh-mw-drawer .dsh-mw-topbar {
+    padding-left: max(8px, var(--dsh-mw-safe-l));
+    opacity: .92;
+  }
 
-  /* Scrim — created and owned by the JS half. */
+  /* Scrim — created and owned by the JS half.
+     z-index 55 is the only value that can ever take effect: the scrim is
+     invisible (`opacity: 0`, `pointer-events: none`) until the drawer opens,
+     and 55 is what the drawer-open state used to carry. A second `z-index: 65`
+     here was dead code — this rule is (0,1,0) and the drawer-open rule was
+     (0,2,1), so the lower-specificity value could never win. Carrying both was
+     a descending-specificity trap with no upside. */
   .dsh-mw-scrim {
     position: fixed;
     inset: 0;
-    z-index: 65;
+    z-index: 55;
     background: rgba(0, 0, 0, .42);
     opacity: 0;
     pointer-events: none;
@@ -341,7 +354,7 @@
     overflow-x: auto !important;
     overflow-y: hidden !important;
     margin: 0 -16px 0 !important;
-    padding: 2px 16px 4px !important;
+    padding: 2px 64px 4px 16px !important;
     scrollbar-width: none !important;
     -webkit-overflow-scrolling: touch !important;
   }
@@ -354,13 +367,13 @@
     align-items: center !important;
     justify-content: center !important;
     gap: 6px !important;
-    padding: 6px 14px !important;
+    padding: 0 16px !important;
     border-radius: 999px !important;
-    font-size: 13px !important;
+    font-size: 14px !important;
     font-weight: 500 !important;
     white-space: nowrap !important;
     flex-shrink: 0 !important;
-    min-height: 32px !important;
+    min-height: 44px !important;
     background: var(--dsw-alias-bg-module-platform, rgba(0, 0, 0, .05)) !important;
     color: var(--dsw-alias-label-secondary, #666) !important;
     border: 1px solid var(--dsw-alias-border-l1, rgba(0, 0, 0, .05)) !important;
@@ -395,10 +408,10 @@
   [class*="_overlay"] [class*="_content"] [class*="_close"] {
     position: fixed !important;
     top: calc(var(--dsh-mw-safe-t) + 8px) !important;
-    right: 14px !important;
-    z-index: 10 !important;
-    width: 32px !important;
-    height: 32px !important;
+    right: 8px !important;
+    z-index: 30 !important;
+    width: 44px !important;
+    height: 44px !important;
     border-radius: 50% !important;
     background: var(--dsw-alias-bg-module-platform, rgba(0, 0, 0, .05)) !important;
     border: none !important;
@@ -416,6 +429,41 @@
     margin-bottom: 14px !important;
     box-shadow: 0 1px 3px rgba(0, 0, 0, .03) !important;
   }
+
+  /* Settings is where a phone needs big targets most: before this, 28 of its
+     51 controls measured under 44px (pills 40, close 32x32, pickers 36, the
+     row disclosure arrow 17x26, "打开配置文件" 28). Rows keep their own box and
+     grow only where they were short. */
+  [class*="_overlay"] [class*="_content"] button,
+  [class*="_overlay"] [class*="_nav"] button {
+    min-height: 44px !important;
+  }
+  [class*="_overlay"] [class*="_selector"] { min-height: 44px !important; }
+  [class*="_overlay"] [class*="_arrows"]:not(:has(button)) { position: relative !important; }
+  [class*="_overlay"] [class*="_arrows"]:not(:has(button))::after {
+    content: '';
+    position: absolute;
+    /* Vertical only: the arrows sit on a 17px-wide stepper, and widening them
+       sideways took the edge of the 增大字号 button beside it (measured). */
+    inset: -11px 0;
+  }
+
+  /* Small controls that stay small on purpose (22px status pills in the
+     composer footer) are marked by the script half and get their 44px here.
+     A clipping row that is not a scroller is opened up so the area can exist;
+     inside a real scroller the control is left alone rather than breaking it. */
+  .dsh-mw-tap { position: relative; }
+  .dsh-mw-tap::after {
+    content: '';
+    position: absolute;
+    inset: -11px -5px;
+  }
+  .dsh-mw-taprow {
+    overflow: visible !important;
+    padding-top: 8px !important;
+    padding-bottom: 8px !important;
+  }
+  [class*="_overlay"] [class*="_row"] { min-height: 44px !important; }
 
   /* Generic dialogs: never wider than the screen. */
   [role="dialog"] {
@@ -645,12 +693,18 @@
   html.dsh-mw-on [class*="_sessionRow"] [class*="_rowActions"] > :not(:first-child) {
     display: none !important;
   }
+  /* Width stays 32px — that is what buys the session title its horizontal
+     room. Height does not: section 8 sets the 44px touch minimum and section
+     10 grows the row to 44px specifically to fit that button, so capping the
+     height here silently undid both (test/e2e.py measures the shortfall as
+     "drawer navigation tap targets >=44px: smallest=32px"). Keep the narrow
+     width; restore the 44px height. */
   html.dsh-mw-drawer [class*="_sessionRow"] [class*="_iconButton"],
   html.dsh-mw-drawer [class*="_projectRow"] [class*="_iconButton"] {
     width: 32px !important;
     min-width: 32px !important;
-    height: 32px !important;
-    min-height: 32px !important;
+    height: 44px !important;
+    min-height: 44px !important;
   }
   html.dsh-mw-on [class*="_sessionRow"] [class*="_time"] {
     font-size: 11px !important;
@@ -741,6 +795,43 @@
     content: '';
     position: absolute;
     inset: -5px -6px;
+  }
+
+  /* The composer's own row is 28px tall (model, permission, workspace, add and
+     send), which is short for a thumb. The controls keep their size and gain a
+     44px touch area; the app's 12px gaps keep the overlap at 4px, inside the
+     rule the rest of this file follows. */
+  html.dsh-mw-on [data-slot^="conversation."] button {
+    position: relative;
+  }
+  html.dsh-mw-on [data-slot^="conversation."] button::after {
+    content: '';
+    position: absolute;
+    inset: -8px -5px;
+  }
+  /* ...but the toolbar row clips that area away: measured, a 28px button's
+     hit box was cut to the row's height, so 21px above its centre landed on
+     the card behind. The row gets the 8px back and stops clipping. */
+  html.dsh-mw-on [data-slot="conversation.composer.bar"] [class*="_row"],
+  html.dsh-mw-on [class*="_composerSeat"] [class*="_row"] {
+    overflow: visible !important;
+    padding-top: 8px !important;
+    padding-bottom: 8px !important;
+  }
+
+  /* The audit measured the composer placeholder at 2.13:1 against white —
+     below WCAG AA, and it is the only thing telling you what the box is for.
+     The two values below clear 4.5:1 on the light and dark surfaces; the
+     `light-dark()` refinement follows the app's own theme switch, and the
+     media query covers browsers without it. */
+  html.dsh-mw-on [class*="placeholder"] {
+    color: #5c6472 !important;
+  }
+  @media (prefers-color-scheme: dark) {
+    html.dsh-mw-on [class*="placeholder"] { color: #a9b1bb !important; }
+  }
+  @supports (color: light-dark(#000, #fff)) {
+    html.dsh-mw-on [class*="placeholder"] { color: light-dark(#5c6472, #a9b1bb) !important; }
   }
 
   /* A workspace row is a FOLDER, but the app only reveals the expand/collapse
@@ -847,6 +938,53 @@
     border-radius: 8px !important;
     background: var(--dsw-alias-interactive-bg-hover, rgba(0, 0, 0, 0.06)) !important;
   }
+
+  /* -------------------------------------------------------------------- *
+   * Recovery bar.                                                        *
+   *                                                                      *
+   * The app reconnects its socket (with backoff) but never reloads the    *
+   * document — no client plugin calls location.reload — so a page left    *
+   * holding a stale bundle or a dead connection stays stuck until the     *
+   * user force-refreshes by hand. This bar is that recovery, one tap      *
+   * away; the element is created by script only while the mobile layout   *
+   * is active, so desktop never sees it.                                  *
+   * -------------------------------------------------------------------- */
+  .dsh-mw-recover {
+    position: fixed;
+    top: calc(var(--dsh-mw-topbar-h) + var(--dsh-mw-safe-t));
+    left: max(8px, var(--dsh-mw-safe-l));
+    right: max(8px, var(--dsh-mw-safe-r));
+    z-index: 2147483000;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 8px 12px 8px 16px;
+    border-radius: 12px;
+    font-size: 14px;
+    line-height: 20px;
+    color: var(--dsw-alias-label-primary, #111);
+    background: var(--dsw-alias-bg-layer-2, var(--dsw-specific-input-major, #fff));
+    border: 1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.12));
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  }
+  .dsh-mw-recover__text {
+    flex: 1;
+    min-width: 0;
+  }
+  .dsh-mw-recover__go {
+    flex: 0 0 auto;
+    min-height: 44px;
+    padding: 0 16px;
+    border: 0;
+    border-radius: 12px;
+    font: inherit;
+    font-weight: 600;
+    color: var(--dsw-alias-label-primary-foreground, #fff);
+    background: var(--dsw-alias-state-business-primary, var(--dsw-alias-button-info-fill, #2563eb));
+    cursor: pointer;
+    touch-action: manipulation;
+  }
 }
 
 /* ---------------------------------------------------------------------- *
@@ -858,3 +996,47 @@
  * already drifted. The test suite drives real mobile viewports through
  * Playwright instead, so the copy bought nothing and was deleted. */
 
+
+/* ---------------------------------------------------------------------- *
+ * Compositing hardening (added 2026-10-25)                               *
+ * ---------------------------------------------------------------------- *
+ * Report: on Android Edge, while a very long message streams, the fixed
+ * top bar's backdrop-filter layer and the app's own scroll/composer layers
+ * can be composited over the conversation — the visible symptom is ghost
+ * text (tool-step captions) and scaled mini-page snapshots painted on top
+ * of code blocks. A blur layer on a fixed element is the usual trigger;
+ * solid background + an isolation boundary keeps every layer in its own
+ * stacking context, so nothing can be painted over the message flow.
+ * Gated to phones exactly like the rest of the file: desktop is untouched. */
+
+@media (max-width: 860px), ((max-height: 500px) and (pointer: coarse)) {
+
+  /* 1. No backdrop-filter anywhere in the mobile chrome: a solid surface
+        cannot smear a snapshot of the page behind it. */
+  .dsh-mw-topbar,
+  .dsh-mw-topbar--glass,
+  [class*="_header"]:has(.dsh-mw-topbar) {
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+    background: var(--dsh-mw-surface, #fff) !important;
+  }
+
+  /* 2. Give the scrolling conversation, the composer and the injected bar
+        their own stacking contexts. */
+  .dsh-mw-topbar { isolation: isolate; }
+  [class*="_conversation"],
+  [class*="_messageList"],
+  [class*="_messageScroll"],
+  [class*="_composer"],
+  [class*="_scrollContainer"] {
+    isolation: isolate;
+  }
+
+  /* 3. Message rows must never be promoted to their own composited layer by
+        a stale transform left over from a streaming animation. */
+  [class*="_messageRow"],
+  [class*="_messageItem"] {
+    transform: none !important;
+    will-change: auto !important;
+  }
+}

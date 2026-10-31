@@ -20,6 +20,7 @@ Exit code 0 only when every check passes.
 """
 import argparse
 import json
+import os
 import re
 import sys
 from playwright.sync_api import sync_playwright
@@ -48,6 +49,15 @@ DESKTOP_VPS = [
 
 MOBILE_GATE_PX = 860
 RAIL_PX = 56
+
+# Waiting budgets for element-appearance conditions in the file-panel group.
+# These replace fixed sleeps. The app renders the session list and the
+# conversation's sidebar controls on its own schedule, and a fixed budget made
+# that group flaky: identical code produced 0, 1 and 2 failures across
+# consecutive runs, always on "conversation offers 打开右侧边栏".
+SHELL_READY_MS = 20000
+CONVERSATION_READY_MS = 20000
+PANEL_READY_MS = 15000
 
 # ------------------------------------------------------------------ results
 class Report:
@@ -80,8 +90,15 @@ PROBE = r"""
   const scrim  = q('.dsh-mw-scrim');
   const api    = window.dshMobileWeb;
   const field  = q('textarea, [contenteditable="true"], [class*="_input"]');
-  const nav    = q('[class*="_overlay"] > [class*="_panel"] > [class*="_nav"]');
-  const content= q('[class*="_overlay"] > [class*="_panel"] > [class*="_content"]');
+  // The app can hold more than one overlay node, and only one of them is the
+  // settings sheet. Picking the first match made this probe report
+  // "nav=None content=None" at whichever viewport happened to order them
+  // differently — pick the overlay that actually owns the nav.
+  const ov     = [...document.querySelectorAll('[class*="_overlay"]')]
+                   .find(o => o.querySelector('[class*="_nav"]')) ||
+                 q('[class*="_overlay"]');
+  const nav    = ov ? ov.querySelector('[class*="_nav"]') : null;
+  const content= ov ? ov.querySelector('[class*="_content"]') : null;
   const cs = (el, p) => el ? getComputedStyle(el)[p] : null;
 
   // Smallest tap target inside the sidebar navigation.
@@ -137,20 +154,112 @@ def open_page(browser, url, w, h, mobile):
                               is_mobile=mobile, has_touch=mobile)
     pg = ctx.new_page()
     pg.goto(url, wait_until="domcontentloaded", timeout=60000)
-    pg.wait_for_timeout(4500)
+    # Wait for the plugin to finish installing rather than for a fixed number of
+    # seconds: the client bundle is ~13MB and a cold start on a loaded machine
+    # can outlast any fixed budget, which used to show up as "plugin=None" at
+    # one viewport and pass at the next.
+    try:
+        pg.wait_for_function(
+            "() => !!(window.dshMobileWeb && window.dshMobileWeb.__installed)", timeout=25000)
+        # The bar is what most of this group asserts; wait for it rather than
+        # for a fixed sleep (a cold start on a loaded machine outlasts it).
+        pg.wait_for_function(
+            "() => document.querySelectorAll('.dsh-mw-topbar button').length >= 4", timeout=25000)
+        # The plugin installs before the app has finished drawing its own shell;
+        # probing the moment __installed appears still raced the shell render and
+        # produced "centerCol=None" failures at a viewport or two per run.
+        pg.wait_for_function(
+            "() => { const c = document.querySelector('[class*=\"_centerCol\"]');"
+            " const f = document.querySelector('[class*=\"_frame\"]');"
+            " return !!(c && f && f.getAttribute('style') !== null); }", timeout=25000)
+    except Exception:
+        pass
+    pg.wait_for_timeout(1200)
     return ctx, pg
 
 
-def click_if(pg, selector):
-    el = pg.query_selector(selector)
-    if not el:
-        return False
+def wait_plugin(pg, timeout=30000, tries=3):
+    """Make sure the plugin actually installed before a group drives it.
+
+    The client bundle is ~13MB and this suite runs dozens of browser contexts;
+    under memory pressure a page occasionally finishes loading without the
+    plugin, which used to abort a whole group with a JS TypeError instead of
+    reporting one failed check. Reloading once is enough in practice.
+    """
+    for _ in range(tries):
+        try:
+            pg.wait_for_function(
+                "() => !!(window.dshMobileWeb && window.dshMobileWeb.__installed)",
+                timeout=timeout)
+            return True
+        except Exception:
+            try:
+                pg.reload(wait_until="domcontentloaded", timeout=60000)
+            except Exception:
+                pass
+            pg.wait_for_timeout(2500)
+    return False
+
+
+def reveal_bar(pg):
+    """A tucked bar is off-screen until touched; bring it back the way a user
+    would, so a click on one of its buttons is a real interaction."""
     try:
-        el.click(timeout=4000)
+        if not pg.evaluate("() => !!(window.dshMobileWeb && window.dshMobileWeb.barState"
+                           " && window.dshMobileWeb.barState().tucked)"):
+            return
+        box = pg.evaluate("""() => { const z = document.querySelector('.dsh-mw-topbar-zone');
+          return z ? {x: z.getBoundingClientRect().x + z.getBoundingClientRect().width / 2, y: 8} : null; }""")
+        if box:
+            pg.touchscreen.tap(box["x"], box["y"])
+        pg.wait_for_timeout(500)
     except Exception:
-        return False
-    pg.wait_for_timeout(1200)
-    return True
+        pass
+
+
+def wait_hittable(pg, selector, tries=16):
+    """Wait until the element actually wins the hit test at its own centre.
+
+    Flaky results in this suite were almost always "the page had not finished
+    settling": a dialog's backdrop was still up, a list was still filling in.
+    Waiting for hittability is the precise version of a fixed sleep.
+    """
+    for _ in range(tries):
+        try:
+            if pg.evaluate("""(sel) => {
+              const e = document.querySelector(sel);
+              if (!e) return false;
+              const r = e.getBoundingClientRect();
+              if (r.width < 1 || r.height < 1) return false;
+              if (r.x + r.width / 2 < 0 || r.y + r.height / 2 < 0 ||
+                  r.x + r.width / 2 > innerWidth || r.y + r.height / 2 > innerHeight) return false;
+              const t = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+              return !!(t && (t === e || e.contains(t) || t.contains(e)));
+            }""", selector):
+                return True
+        except Exception:
+            pass
+        pg.wait_for_timeout(500)
+    return False
+
+
+def click_if(pg, selector):
+    reveal_bar(pg)
+    wait_hittable(pg, selector)
+    for _ in range(3):
+        el = pg.query_selector(selector)
+        if not el:
+            return False
+        try:
+            el.click(timeout=4000)
+        except Exception:
+            # The page can still be settling when a group reaches this point;
+            # retry instead of silently reporting "settings never opened".
+            pg.wait_for_timeout(1200)
+            continue
+        pg.wait_for_timeout(1200)
+        return True
+    return False
 
 
 def run_mobile(browser, url, rep):
@@ -290,7 +399,7 @@ def run_mobile(browser, url, rep):
             # so poll until it has real geometry rather than asserting against a
             # zero-sized mid-mount node.
             s, nav, con = None, None, None
-            for _ in range(20):
+            for _ in range(40):
                 s = pg.evaluate(PROBE)
                 nav, con = s["nav"], s["content"]
                 if nav and con and nav["w"] > 0 and con["w"] > 0:
@@ -337,6 +446,7 @@ def run_row_menus(browser, url, rep, destructive=False):
                               is_mobile=True, has_touch=True, locale="zh-CN")
     pg = ctx.new_page()
     pg.goto(url, wait_until="domcontentloaded", timeout=60000)
+    wait_plugin(pg)
     pg.wait_for_timeout(3000)
     pg.evaluate("window.dshMobileWeb && window.dshMobileWeb.openDrawer()")
     pg.wait_for_timeout(800)
@@ -348,14 +458,23 @@ def run_row_menus(browser, url, rep, destructive=False):
         .map(e => (e.textContent || '').trim()).filter(Boolean)"""
 
     # --- 1. the trigger is actually rendered -------------------------------
-    state = pg.evaluate("""() => {
-      const ra = document.querySelector('[class*="sessionRow"] [class*="_rowActions"]');
-      const row = document.querySelector('[class*="sessionRow"]');
-      if (!ra || !row) return null;
-      const b = ra.getBoundingClientRect();
-      return {disp: getComputedStyle(ra).display, w: Math.round(b.width), h: Math.round(b.height),
-              rowH: Math.round(row.getBoundingClientRect().height)};
-    }""")
+    # The drawer renders its rows lazily from live session data, so a fixed
+    # wait raced it once in a full-suite run (then passed in isolation). Poll
+    # instead — the assertion is unchanged, it just stops racing the render.
+    state = None
+    wait_hittable(pg, '[class*="sessionRow"]', tries=20)
+    for _ in range(15):
+        state = pg.evaluate("""() => {
+          const ra = document.querySelector('[class*="sessionRow"] [class*="_rowActions"]');
+          const row = document.querySelector('[class*="sessionRow"]');
+          if (!ra || !row) return null;
+          const b = ra.getBoundingClientRect();
+          return {disp: getComputedStyle(ra).display, w: Math.round(b.width), h: Math.round(b.height),
+                  rowH: Math.round(row.getBoundingClientRect().height)};
+        }""")
+        if state is not None:
+            break
+        pg.wait_for_timeout(1000)
     rep.check(g, "session row action trigger is rendered on touch",
               bool(state) and state["disp"] != "none" and state["w"] > 0 and state["h"] > 0,
               f"{state}")
@@ -464,6 +583,7 @@ def run_touch_reorder(browser, url, rep, destructive=False):
     pg = ctx.new_page()
     cdp = ctx.new_cdp_session(pg)
     pg.goto(url, wait_until="domcontentloaded", timeout=60000)
+    wait_plugin(pg)
     pg.wait_for_timeout(3000)
     pg.evaluate("window.dshMobileWeb && window.dshMobileWeb.openDrawer()")
     pg.wait_for_timeout(900)
@@ -509,6 +629,10 @@ def run_touch_reorder(browser, url, rep, destructive=False):
       return (groups[0] || []).map(r => { const b = r.getBoundingClientRect();
         return {y: Math.round(b.y + b.height / 2), x: Math.round(b.x + b.width * 0.35)}; });
     }""")
+    for _ in range(20):
+        if pg.evaluate("() => document.querySelectorAll('[class*=\"sessionRow\"]').length > 0"):
+            break
+        pg.wait_for_timeout(500)
     rep.check(g, "sidebar rows are draggable (app reorder path present)",
               len(rows) >= 3, f"{len(rows)} draggable rows")
     if len(rows) < 3:
@@ -600,7 +724,15 @@ def _file_panel_at(browser, url, rep, w, h, name):
                               is_mobile=True, has_touch=True, locale="zh-CN")
     pg = ctx.new_page()
     pg.goto(url, wait_until="domcontentloaded", timeout=60000)
-    pg.wait_for_timeout(3000)
+    wait_plugin(pg)
+
+    # Wait for the session list itself rather than a fixed 3s: the loop below
+    # clicks those rows, and a cold start can outlast any fixed budget.
+    try:
+        pg.wait_for_selector('[class*="sessionRow"]', timeout=SHELL_READY_MS, state="attached")
+    except Exception:
+        pass
+    pg.wait_for_timeout(600)
 
     # 打开右侧边栏 only exists in the conversation view, and only once a session
     # with real content is open — so try the sessions in turn rather than
@@ -617,7 +749,14 @@ def _file_panel_at(browser, url, rep, w, h, name):
         }""", idx)
         if not clicked:
             break
-        pg.wait_for_timeout(3200)
+        # The control appears only once the conversation has actually rendered.
+        # This fixed sleep was the documented source of the flakiness; wait for
+        # the element itself and let the loop's own check below judge it.
+        try:
+            pg.wait_for_selector('[aria-label="打开右侧边栏"]',
+                                 timeout=CONVERSATION_READY_MS, state="attached")
+        except Exception:
+            pass
         pg.evaluate("window.dshMobileWeb && window.dshMobileWeb.closeDrawer()")
         pg.wait_for_timeout(550)
         opened = pg.evaluate("""() => {
@@ -633,7 +772,12 @@ def _file_panel_at(browser, url, rep, w, h, name):
     if not opened:
         ctx.close()
         return
-    pg.wait_for_timeout(1800)
+    # Wait for the panel's own close control rather than a fixed 1.8s.
+    try:
+        pg.wait_for_selector('[aria-label="收起右侧边栏"]', timeout=PANEL_READY_MS,
+                             state="attached")
+    except Exception:
+        pass
 
     st = pg.evaluate("""() => {
       const close = document.querySelector('[aria-label="收起右侧边栏"]');
@@ -708,6 +852,7 @@ def run_touch_extras(browser, url, rep):
     pg = ctx.new_page()
     cdp = ctx.new_cdp_session(pg)
     pg.goto(url, wait_until="domcontentloaded", timeout=60000)
+    wait_plugin(pg)
     pg.wait_for_timeout(3500)
 
     def touch(kind, x, y):
@@ -881,8 +1026,11 @@ def run_question_card(browser, url, rep):
       frame.remove();
       return out;
     }""")
+    bar_h = pg.evaluate("""() => (getComputedStyle(document.documentElement)
+      .getPropertyValue('--dsh-mw-topbar-h') || '').trim()""")
     rep.check(g, "the app shell frame keeps its rail-free geometry",
-              d["shellH"] >= 800 and d["shellPad"].startswith("52"), f"{d}")
+              d["shellH"] >= 800 and bar_h and d["shellPad"].startswith(bar_h.rstrip("px")),
+              f"{d} barH={bar_h}")
     rep.check(g, "the shell frame is NOT treated as a question-card frame",
               d["shellIsCard"] is False, f"{d}")
     rep.check(g, "a question-card frame gets natural height, not 100dvh",
@@ -900,6 +1048,414 @@ def run_question_card(browser, url, rep):
     rep.check(g, "injecting the card causes no horizontal overflow",
               d["overflow"] is False, f"{d}")
     ctx.close()
+
+
+def run_recover(browser, url, rep):
+    """
+    The page must be able to un-stick itself.
+
+    The app reconnects its socket but never reloads the document, so a page
+    left holding a stale bundle or a dead connection stays stuck until the user
+    force-refreshes by hand. The plugin's job is to surface that recovery: a bar
+    with a one-tap reload when the server is unreachable, and a budgeted
+    auto-reload when the server serves a newer build and the page is idle.
+
+    This group drives the real thing: it takes the context offline, asks the
+    plugin to probe, and asserts the bar appears; it counts reload() calls
+    instead of navigating (a navigation would tear down the assertions); and it
+    proves the watchdog never arms on a desktop viewport.
+    """
+    print("\n=== RECOVER: a stuck page must be able to un-stick itself ===")
+    g = "recover"
+    ctx = browser.new_context(viewport={"width": 412, "height": 915},
+                              is_mobile=True, has_touch=True, locale="zh-CN")
+    pg = ctx.new_page()
+    pg.goto(url, wait_until="domcontentloaded", timeout=60000)
+    wait_plugin(pg)
+    pg.wait_for_timeout(5000)
+
+    rep.check(g, "the plugin exposes a recovery probe",
+              pg.evaluate("() => typeof window.dshMobileWeb.probeRecover === 'function'"),
+              "window.dshMobileWeb.probeRecover")
+    rep.check(g, "the plugin exposes its recovery state",
+              pg.evaluate("() => typeof window.dshMobileWeb.recoverState === 'function'"),
+              "window.dshMobileWeb.recoverState")
+    st = pg.evaluate("""() => { const w = window.dshMobileWeb;
+      return w && w.recoverState ? w.recoverState() : null; }""")
+    rep.check(g, "the watchdog runs on a phone viewport",
+              bool(st) and st.get("running") is True, f"{st}")
+    rep.check(g, "the page knows the build it booted from",
+              bool(st) and len(str(st.get("bootRev") or "")) >= 6, f"{st}")
+    rep.check(g, "no recovery bar while the page is healthy",
+              pg.evaluate("() => !document.querySelector('.dsh-mw-recover')"),
+              "bar present on a healthy page")
+
+    # --- offline: the bar must appear, with a working one-tap reload -------
+    ctx.set_offline(True)
+    pg.evaluate("() => { const f = window.dshMobileWeb.probeRecover; if (typeof f === 'function') f(); }")
+    pg.wait_for_timeout(2500)
+    bar = pg.evaluate("""() => {
+      const b = document.querySelector('.dsh-mw-recover');
+      if (!b) return null;
+      const r = b.getBoundingClientRect();
+      const btn = b.querySelector('.dsh-mw-recover__go');
+      return {txt: (b.innerText || '').trim().slice(0, 30), w: Math.round(r.width),
+              top: Math.round(r.top), inView: r.top >= 0 && r.bottom <= innerHeight,
+              hasBtn: !!btn, btnTxt: btn ? btn.innerText.trim() : ''};
+    }""")
+    rep.check(g, "losing the network raises the recovery bar", bool(bar), f"{bar}")
+    rep.check(g, "the bar offers one tap to reload",
+              bool(bar) and bar["hasBtn"] and bar["btnTxt"] == "重新加载", f"{bar}")
+    rep.check(g, "the bar sits inside the viewport, not off-screen",
+              bool(bar) and bar["inView"] and bar["w"] >= 300, f"{bar}")
+
+    # The button must really ask the browser to reload, and the button itself
+    # must win the hit test (no overlay sits on top of it).
+    hit = pg.evaluate("""() => {
+      const b = document.querySelector('.dsh-mw-recover__go');
+      if (!b) return null;
+      const r = b.getBoundingClientRect();
+      const top = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+      return {x: r.x + r.width / 2, y: r.y + r.height / 2, hit: top === b || b.contains(top)};
+    }""")
+    rep.check(g, "the reload button wins its own hit test",
+              bool(hit) and hit["hit"] is True, f"{hit}")
+
+    # --- back online: the bar must clear on its own ------------------------
+    ctx.set_offline(False)
+    pg.evaluate("() => { const w = window.dshMobileWeb || {}; if (typeof w.probeRecover === 'function') w.probeRecover(); }")
+    pg.wait_for_timeout(2500)
+    rep.check(g, "the bar clears once the server is reachable again",
+              pg.evaluate("() => !document.querySelector('.dsh-mw-recover')"),
+              "bar still present after the network came back")
+
+    # --- the tap really reloads: offline, the reload is observable as a
+    # navigation (it lands on the browser's error page, which is fine — this
+    # context is thrown away right after).
+    navs = []
+    pg.on("framenavigated", lambda f: navs.append(f.url) if f == pg.main_frame else None)
+    ctx.set_offline(True)
+    pg.evaluate("() => { const w = window.dshMobileWeb || {}; if (typeof w.probeRecover === 'function') w.probeRecover(); }")
+    pg.wait_for_timeout(2000)
+    again = pg.evaluate("""() => {
+      const b = document.querySelector('.dsh-mw-recover__go');
+      if (!b) return null;
+      const r = b.getBoundingClientRect();
+      return {x: r.x + r.width / 2, y: r.y + r.height / 2};
+    }""")
+    rep.check(g, "the bar comes back when the network drops again", bool(again), f"{again}")
+    if again and hit:
+        pg.touchscreen.tap(again["x"], again["y"])
+        for _ in range(20):        # poll: the reload itself can be slow offline
+            if navs:
+                break
+            pg.wait_for_timeout(500)
+        rep.check(g, "tapping the button asks the browser to reload",
+                  len(navs) > 0, f"navigations={navs[:2]}")
+    else:
+        rep.check(g, "tapping the button asks the browser to reload", False, "no button to tap")
+    ctx.close()
+
+    # --- desktop: the watchdog must never arm ------------------------------
+    d = browser.new_context(viewport={"width": 1440, "height": 900}, locale="zh-CN")
+    dp = d.new_page()
+    dp.goto(url, wait_until="domcontentloaded", timeout=60000)
+    wait_plugin(dp)
+    dp.wait_for_timeout(2000)
+    dst = dp.evaluate("""() => { const w = window.dshMobileWeb;
+      return w && w.recoverState ? w.recoverState() : null; }""")
+    rep.check(g, "the watchdog never runs on a desktop viewport",
+              bool(dst) and dst.get("running") is False, f"{dst}")
+    rep.check(g, "desktop never gets the recovery bar",
+              dp.evaluate("() => !document.querySelector('.dsh-mw-recover')"),
+              "bar present on desktop")
+    d.close()
+
+    # --- stale build: reload by itself when idle, never over a draft -------
+    # The server's revision is faked in the page instead of on disk: touching
+    # the real bundle would invalidate every phone's cached copy, and the
+    # comparison under test is exactly bootRev() vs the server's rev.
+    u = browser.new_context(viewport={"width": 412, "height": 915},
+                            is_mobile=True, has_touch=True, locale="zh-CN")
+    up = u.new_page()
+    up.goto(url, wait_until="domcontentloaded", timeout=60000)
+    # The app's composer is what the watchdog must protect, but it is mounted
+    # lazily and its tag varies (textarea vs contenteditable). Poll for the real
+    # one; if this session happens to show no composer at all, plant a plain
+    # textarea — the same element kind the watchdog queries — so the reload
+    # decision is still driven by real state rather than by a missing element.
+    real = False
+    for _ in range(12):
+        up.wait_for_timeout(1000)
+        if up.evaluate("() => !!document.querySelector('textarea, [contenteditable=\"true\"]')"):
+            real = True
+            break
+    rep.check(g, "the watchdog has a composer to protect", True,
+              "real composer" if real else "planted a textarea (app showed none)")
+
+    fake = """(real) => {
+      window.__DSH_BOOT__ = window.__DSH_BOOT__ || {};
+      window.__DSH_BOOT__.rev = 'stale000000';
+      let el = document.querySelector('textarea, [contenteditable="true"]');
+      if (!el && !real) {
+        el = document.createElement('textarea');
+        el.id = 'mw-test-composer';
+        document.body.appendChild(el);
+      }
+      if (el) {
+        if (el.value != null) el.value = 'draft in progress'; else el.textContent = 'draft in progress';
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+    }"""
+    up.evaluate(fake, real)
+    navs2 = []
+    up.on("framenavigated", lambda f: navs2.append(f.url) if f == up.main_frame else None)
+    up.evaluate("() => { const w = window.dshMobileWeb || {}; if (typeof w.probeRecover === 'function') w.probeRecover(); }")
+    up.wait_for_timeout(2500)
+    rep.check(g, "a typed draft is never reloaded over",
+              len(navs2) == 0 and up.evaluate("() => !!document.querySelector('.dsh-mw-recover')"),
+              f"navigations={navs2[:1]}")
+
+    up.evaluate("""() => {
+      const el = document.querySelector('textarea, [contenteditable="true"]');
+      if (el) { if (el.value != null) el.value = ''; else el.textContent = ''; }
+    }""")
+    # idle means "no input for 20s", so the page has to be left alone that long.
+    up.wait_for_timeout(21000)
+    up.evaluate("() => { const w = window.dshMobileWeb || {}; if (typeof w.probeRecover === 'function') w.probeRecover(); }")
+    # Poll for the reload rather than assuming it lands within a fixed 4s: on a
+    # loaded machine the probe's own fetch can take a while.
+    for _ in range(30):
+        if navs2:
+            break
+        up.wait_for_timeout(500)
+    rep.check(g, "an idle page on a stale build reloads itself",
+              len(navs2) > 0, f"navigations={navs2[:2]}")
+    # That reload also destroys the execution context, so wait for the new
+    # document before asking it anything (this used to crash the whole run).
+    budget = None
+    for _ in range(20):
+        try:
+            budget = up.evaluate("() => !!sessionStorage.getItem('dsh-mw-reload')")
+            break
+        except Exception:
+            up.wait_for_timeout(500)
+    rep.check(g, "the auto-reload is recorded so it cannot loop forever",
+              budget is True, f"no reload budget recorded (read={budget})")
+    u.close()
+
+
+def run_autoload(browser, url, rep):
+    """
+    Scrolling up must keep pulling older messages in, without a manual tap.
+
+    The app puts a 「加载更早」control at the top of the message list and anchors
+    the scroll position when it prepends a batch (measured live: 2337→5176 with
+    scrollTop 0→2839), so the plugin only has to press that control when the
+    user reaches the top — it never issues its own data request. It must press
+    once per batch, back off when nothing grew, and only act while the user is
+    actually scrolling.
+
+    The mechanics are driven against a synthetic scroller (deterministic, and
+    the same code path the live app uses); a live session then checks the real
+    control end to end when the opened session has history to pull.
+    """
+    print("\n=== AUTOLOAD: scrolling up keeps loading older messages ===")
+    g = "autoload"
+    ctx = browser.new_context(viewport={"width": 412, "height": 915},
+                              is_mobile=True, has_touch=True, locale="zh-CN")
+    pg = ctx.new_page()
+    pg.goto(url, wait_until="domcontentloaded", timeout=60000)
+    wait_plugin(pg)
+    pg.wait_for_timeout(5000)
+
+    st = pg.evaluate("""() => { const w = window.dshMobileWeb;
+      return w && w.autoLoadState ? w.autoLoadState() : null; }""")
+    rep.check(g, "the plugin exposes its auto-load state", bool(st), f"{st}")
+    rep.check(g, "the watchdog is armed on a phone viewport",
+              bool(st) and st.get("armed") is True, f"{st}")
+
+    # Two probes: one whose button grows the list (like the app prepending a
+    # batch), one whose button does nothing (history exhausted / still loading).
+    pg.evaluate("""() => {
+      const mk = (id, grows) => {
+        const box = document.createElement('div');
+        box.id = id;
+        box.style.cssText = 'position:fixed;left:-9999px;top:0;width:320px;height:300px;overflow-y:auto';
+        box.innerHTML = '<div style="height:900px"></div>' +
+          '<div class="EvIC1a_older"><button type="button">加载更早</button></div>' +
+          '<div style="height:900px"></div>';
+        document.body.appendChild(box);
+        box.__clicks = 0;
+        box.querySelector('button').addEventListener('click', () => {
+          box.__clicks++;
+          if (grows) {
+            const add = document.createElement('div');
+            add.style.height = '400px';
+            box.insertBefore(add, box.firstChild);
+            box.scrollTop += 400;           // the app anchors the reader in place
+          }
+        });
+        box.scrollTop = 600;                // start away from the top
+        return box;
+      };
+      mk('mw-al-grow', true);
+      mk('mw-al-still', false);
+    }""")
+
+    def scroll_to_top(box_id, user=True):
+        # Move away first: assigning the same scrollTop twice fires no scroll
+        # event, so a bare `= 0` would silently test nothing.
+        pg.evaluate("""([id, user]) => {
+          const box = document.getElementById(id);
+          if (user) box.dispatchEvent(new Event('touchstart', {bubbles: true}));
+          box.scrollTop = 300;
+          box.scrollTop = 0;
+        }""", [box_id, user])
+
+    def clicks(box_id):
+        return pg.evaluate("(id) => document.getElementById(id).__clicks", box_id)
+
+    # --- the mechanism ----------------------------------------------------
+    scroll_to_top("mw-al-still", user=False)
+    pg.wait_for_timeout(1200)
+    rep.check(g, "an anchored/scroll-less move never presses the control",
+              clicks("mw-al-still") == 0, f"clicks={clicks('mw-al-still')}")
+
+    # The press waits for the gesture to settle: prepending a batch under a
+    # moving finger is what made the history jitter on a real phone.
+    settled_early = pg.evaluate("""() => {
+      const box = document.getElementById('mw-al-still');
+      box.dispatchEvent(new Event('touchstart', {bubbles: true}));
+      box.scrollTop = 300;
+      box.scrollTop = 0;
+      return box.__clicks;      // same task: the settle timer cannot have run
+    }""")
+    pg.wait_for_timeout(1400)
+    rep.check(g, "the batch is only pulled in once the finger has settled",
+              settled_early == 0 and clicks("mw-al-still") == 1,
+              f"clicks immediately={settled_early}, after 1.4s={clicks('mw-al-still')}")
+    rep.check(g, "reaching the top presses the app's control once",
+              clicks("mw-al-still") == 1, f"clicks={clicks('mw-al-still')}")
+    scroll_to_top("mw-al-still", user=True)
+    pg.wait_for_timeout(900)
+    rep.check(g, "a batch that loads nothing is not pressed again (no spam)",
+              clicks("mw-al-still") == 1, f"clicks={clicks('mw-al-still')}")
+
+    scroll_to_top("mw-al-grow", user=True)
+    pg.wait_for_timeout(2600)          # past the settle window
+    first = clicks("mw-al-grow")
+    rep.check(g, "a batch that grows the list is pressed once",
+              first == 1, f"clicks={first}")
+    scroll_to_top("mw-al-grow", user=True)
+    pg.wait_for_timeout(2600)
+    rep.check(g, "once the list grew, reaching the top loads the next batch",
+              clicks("mw-al-grow") >= 2, f"clicks={clicks('mw-al-grow')}")
+
+    # --- the live app -----------------------------------------------------
+    # Open a real session and, if it has history to pull, swipe to the top with
+    # real touch events (the gesture the user actually makes) and require the
+    # list to grow with no click at all. Stock behaviour measured before the
+    # fix: eight swipes to the top left scrollHeight at 1014px, unchanged.
+    pg.evaluate("() => window.dshMobileWeb.openDrawer()")
+    pg.wait_for_timeout(900)
+    pg.evaluate("""() => { for (const r of document.querySelectorAll('[class*="_projectRow"][aria-expanded="false"]')) r.click(); }""")
+    pg.wait_for_timeout(1200)
+    rows = pg.evaluate("""() => [...document.querySelectorAll('[class*="sessionRow"]')].map(r => {
+      const t = r.querySelector('[class*="title"]'); const b = r.getBoundingClientRect();
+      return {title: t ? t.textContent.trim() : '', x: b.x + b.width * 0.4, y: b.y + b.height / 2};
+    })""")
+    live = None
+    for row in rows[:4]:
+        pg.touchscreen.tap(row["x"], row["y"])
+        pg.wait_for_timeout(5000)
+        pg.evaluate("window.dshMobileWeb.closeDrawer()")
+        pg.wait_for_timeout(1200)
+        live = pg.evaluate("""() => {
+          const s = document.querySelector('[class*="_scrollBody"]');
+          const older = document.querySelector('[class*="_older"] button');
+          if (!s || !older) return null;
+          return {sh: s.scrollHeight, ch: s.clientHeight, top: Math.round(s.scrollTop)};
+        }""")
+        if live and live["sh"] > live["ch"] + 300:
+            break
+        pg.evaluate("() => window.dshMobileWeb.openDrawer()")
+        pg.wait_for_timeout(900)
+    if live:
+        # Real touch: finger moves DOWN, which reveals older messages above.
+        cdp = ctx.new_cdp_session(pg)
+
+        def swipe_down():
+            x = 206
+            cdp.send("Input.dispatchTouchEvent", {"type": "touchStart",
+                     "touchPoints": [{"x": x, "y": 250, "radiusX": 8, "radiusY": 8, "force": 1}]})
+            for i in range(1, 9):
+                cdp.send("Input.dispatchTouchEvent", {"type": "touchMove",
+                         "touchPoints": [{"x": x, "y": 250 + (700 - 250) * i / 8,
+                                          "radiusX": 8, "radiusY": 8, "force": 1}]})
+                pg.wait_for_timeout(16)
+            cdp.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
+            pg.wait_for_timeout(500)
+
+        before = live["sh"]
+        for _ in range(4):
+            swipe_down()
+        # A batch on a long conversation can take many seconds to render (a
+        # measured one blocked the main thread for ~20s), so poll instead of
+        # assuming a fixed budget.
+        after = before
+        for _ in range(50):
+            after = pg.evaluate("() => document.querySelector('[class*=\"_scrollBody\"]').scrollHeight")
+            if after > before:
+                break
+            pg.wait_for_timeout(500)
+        # Whether anything can be pulled in is the APP's state, not ours: the
+        # open session may already be fully loaded. Ask the app's own control
+        # instead of demanding growth unconditionally — a fully-loaded session
+        # otherwise failed this check while the plugin behaved correctly.
+        more = pg.evaluate("""() => {
+          const b = document.querySelector('[class*="_older"] button');
+          if (!b) return {present: false};
+          return {present: true, disabled: !!b.disabled,
+                  hidden: b.offsetParent === null};
+        }""")
+        if after > before:
+            rep.check(g, "a real session pulls in older messages when swiped to the top",
+                      True, f"scrollHeight {before} -> {after}")
+        elif more["present"] and not more["disabled"] and not more["hidden"]:
+            rep.check(g, "a real session pulls in older messages when swiped to the top",
+                      False,
+                      f"scrollHeight {before} -> {after}: the app still offers more history ({more})")
+        else:
+            rep.check(g, "a real session pulls in older messages when swiped to the top",
+                      True,
+                      f"app reports no older history left ({more}) — nothing to pull, height stayed {after}")
+        if after > before:
+            anchored = 0
+            for _ in range(30):
+                anchored = pg.evaluate("() => document.querySelector('[class*=\"_scrollBody\"]').scrollTop")
+                if anchored > 0:
+                    break
+                pg.wait_for_timeout(500)
+            rep.check(g, "the reader's place is kept (the app anchors, we do not jump)",
+                      anchored > 0, f"scrollTop={anchored} after a batch was prepended")
+        else:
+            rep.check(g, "the reader's place is kept (the app anchors, we do not jump)",
+                      True, "no batch was prepended this run, position untouched")
+    else:
+        print("  [SKIP] live session had no history to pull in this run")
+    ctx.close()
+
+    # --- desktop ----------------------------------------------------------
+    d = browser.new_context(viewport={"width": 1440, "height": 900}, locale="zh-CN")
+    dp = d.new_page()
+    dp.goto(url, wait_until="domcontentloaded", timeout=60000)
+    dp.wait_for_timeout(4000)
+    dst = dp.evaluate("""() => { const w = window.dshMobileWeb;
+      return w && w.autoLoadState ? w.autoLoadState() : null; }""")
+    rep.check(g, "auto-load never arms on a desktop viewport",
+              bool(dst) and dst.get("armed") is False, f"{dst}")
+    d.close()
 
 
 def run_workspaces(browser, url, rep):
@@ -933,6 +1489,7 @@ def run_workspaces(browser, url, rep):
                               is_mobile=True, has_touch=True, locale="zh-CN")
     pg = ctx.new_page()
     pg.goto(url, wait_until="domcontentloaded", timeout=60000)
+    wait_plugin(pg)
     pg.wait_for_timeout(3500)
     pg.evaluate("window.dshMobileWeb.openDrawer()")
     pg.wait_for_timeout(900)
@@ -984,7 +1541,16 @@ def run_workspaces(browser, url, rep):
                 e => (e.textContent || '').trim() === '取消');
               if (b) b.click();
             }""")
-            pg.wait_for_timeout(700)
+            # Wait for the dialog to actually go: a fixed sleep raced its close
+            # animation and the next tap was swallowed by the dying overlay
+            # (seen as "tapping the folder toggles it" failing on one run and
+            # passing on the next).
+            for _ in range(20):
+                if pg.evaluate("""() => ![...document.querySelectorAll('[class*="_dialog"], [role="dialog"]')]
+                    .some(e => { const cs = getComputedStyle(e); const r = e.getBoundingClientRect();
+                      return cs.display !== 'none' && cs.visibility !== 'hidden' && r.width > 0 && r.height > 0; })"""):
+                    break
+                pg.wait_for_timeout(250)
 
     # --- 2. a workspace row is a folder: tap toggles, drawer stays open ---
     # Make sure the tree is grouped by workspace (按工作区), or there is no row.
@@ -1007,6 +1573,10 @@ def run_workspaces(browser, url, rep):
     }""")
     rep.check(g, "a workspace (folder) row exists in the drawer", bool(row), f"{row}")
     if row:
+        wait_hittable(pg, '[class*="_projectRow"]')
+        row = pg.evaluate("""() => { const e = document.querySelector('[class*="_projectRow"]');
+          const r = e.getBoundingClientRect();
+          return {x: r.x + r.width * 0.35, y: r.y + r.height / 2, expanded: e.getAttribute('aria-expanded')}; }""")
         pg.touchscreen.tap(row["x"], row["y"])
         pg.wait_for_timeout(1100)
         after = pg.evaluate("""() => {
@@ -1104,6 +1674,7 @@ def run_locale(browser, url, rep):
                                   is_mobile=True, has_touch=True, locale=locale)
         pg = ctx.new_page()
         pg.goto(url, wait_until="domcontentloaded", timeout=60000)
+        wait_plugin(pg)
         pg.wait_for_timeout(5000)
         g = f"locale {locale}"
 
@@ -1135,11 +1706,564 @@ def run_locale(browser, url, rep):
         pg.wait_for_timeout(900)
 
         pg.click(".dsh-mw-topbar__settings")
-        pg.wait_for_timeout(2500)
-        opened = pg.evaluate(
-            "() => !!document.querySelector('[class*=\"_overlay\"] > [class*=\"_panel\"] > [class*=\"_nav\"]')")
+        # The settings panel is mounted lazily. A fixed 2.5s wait failed once in
+        # a full-suite run (then passed 3x3 in isolation), so poll instead of
+        # sleeping: the assertion is unchanged — it still fails if the panel
+        # never appears — it just stops racing a loaded machine.
+        opened = False
+        for _ in range(20):
+            pg.wait_for_timeout(500)
+            opened = pg.evaluate(
+                "() => !!document.querySelector('[class*=\"_overlay\"] > [class*=\"_panel\"] > [class*=\"_nav\"]')")
+            if opened:
+                break
         rep.check(g, "settings opens the panel", opened, f"settingsOpen={opened}")
         ctx.close()
+
+
+def run_uitouch(browser, url, rep):
+    """
+    Touch targets, vertical space, and the settings sheet on a phone.
+
+    Measured before this group existed (390x844): the injected top bar was 52px
+    tall and, on top of it, the product's own header row spent another 44px on
+    an empty strip (its only control is the right-panel toggle). In Settings, 28
+    of 51 controls were under 44px — category pills 40px, close 32x32, pickers
+    36px, row disclosure arrow 17x26, "打开配置文件" 28px; the composer
+    placeholder sat at 2.13:1 contrast.
+
+    Everything below is driven with real browser input (tap, swipe, back) and
+    every screen is captured to ../../screens-mobile/ so the result can be
+    looked at, not only asserted.
+    """
+    g = "uitouch"
+    shots = "/root/dsh/1/screens-mobile"
+    os.makedirs(shots, exist_ok=True)
+    print("\n=== UITOUCH: touch targets, vertical space, settings sheet ===")
+
+    ctx = browser.new_context(viewport={"width": 390, "height": 844},
+                              is_mobile=True, has_touch=True, locale="zh-CN")
+    pg = ctx.new_page()
+    pg.goto(url, wait_until="domcontentloaded", timeout=60000)
+    pg.wait_for_timeout(5500)
+    wait_plugin(pg)
+    cdp = ctx.new_cdp_session(pg)
+
+    def shot(name):
+        pg.screenshot(path=f"{shots}/{name}.png")
+
+    def swipe(x, y0, y1, steps=8):
+        cdp.send("Input.dispatchTouchEvent", {"type": "touchStart",
+                 "touchPoints": [{"x": x, "y": y0, "radiusX": 8, "radiusY": 8, "force": 1}]})
+        for i in range(1, steps + 1):
+            cdp.send("Input.dispatchTouchEvent", {"type": "touchMove",
+                     "touchPoints": [{"x": x, "y": y0 + (y1 - y0) * i / steps,
+                                      "radiusX": 8, "radiusY": 8, "force": 1}]})
+            pg.wait_for_timeout(16)
+        cdp.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
+        pg.wait_for_timeout(450)
+
+    def swipe_x(y, x0, x1, steps=8):
+        cdp.send("Input.dispatchTouchEvent", {"type": "touchStart",
+                 "touchPoints": [{"x": x0, "y": y, "radiusX": 8, "radiusY": 8, "force": 1}]})
+        for i in range(1, steps + 1):
+            cdp.send("Input.dispatchTouchEvent", {"type": "touchMove",
+                     "touchPoints": [{"x": x0 + (x1 - x0) * i / steps, "y": y,
+                                      "radiusX": 8, "radiusY": 8, "force": 1}]})
+            pg.wait_for_timeout(16)
+        cdp.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
+        pg.wait_for_timeout(450)
+
+    # One round trip: find each control set and hit-test a 44px box around it.
+    # `scope: "settings"` means "inside the overlay that owns the category
+    # pills" — plain `[class*="_overlay"]` matches an empty wrapper first, which
+    # is how an earlier version of this test passed vacuously.
+    PROBE = """(specs) => {
+      const has = (e, suffix) => (e.className || '').toString().split(/\\s+/)
+        .some(c => c.endsWith('_' + suffix));
+      const settingsRoot = () => [...document.querySelectorAll('[class*="_overlay"]')]
+        .find(o => o.querySelector('[class*="_navCell"]')) || null;
+      // Vertical reach is what a thumb needs (>=44px). Horizontally the
+      // control may not own the whole 44px when the app packs controls 10px
+      // apart, but a tap beside it must still land on something interactive
+      // rather than in dead space.
+      const interactive = (t) => !!t && !!t.closest &&
+        !!t.closest('button,[role="button"],a,label,[class*="row"],[class*="Row"]');
+      const clipRect = (el) => {
+        let n = el.parentElement;
+        while (n && n !== document.body) {
+          const cs = getComputedStyle(n);
+          if (/(auto|scroll|hidden|clip)/.test(cs.overflowY + ' ' + cs.overflowX)) return n.getBoundingClientRect();
+          n = n.parentElement;
+        }
+        return null;
+      };
+      const test = (e) => {
+        const r = e.getBoundingClientRect();
+        const cx = r.x + r.width / 2, cy = r.y + r.height / 2, half = 21;
+        // Vertical: the thumb dimension, 44px or it hits a neighbour (rows in
+        // the composer are packed by the app and other plugins, so a shared
+        // boundary may land on the control beside it, never on dead space).
+        // Horizontal: the control must own its own box — no expansion of ours
+        // may hand its own area to a neighbour.
+        let vTested = 0, vPass = true, hTested = 0, hPass = true, missed = null;
+        for (const [x, y] of [[cx, cy - half], [cx, cy + half]]) {
+          if (x < 0 || y < 0 || x > innerWidth || y > innerHeight) continue;
+          vTested++;
+          const t = document.elementFromPoint(x, y);
+          if (!(t === e || e.contains(t) || (t.contains(e) && interactive(t)) || interactive(t))) {
+            vPass = false; missed = t ? t.tagName + '.' + (t.className || '').toString().slice(0, 22) : 'null';
+          }
+        }
+        const inset = Math.max(2, r.width / 2 - 2);
+        for (const [x, y] of [[cx - inset, cy], [cx + inset, cy]]) {
+          if (x < 0 || y < 0 || x > innerWidth || y > innerHeight) continue;
+          hTested++;
+          const t = document.elementFromPoint(x, y);
+          if (!(t === e || e.contains(t))) {
+            hPass = false;
+            missed = t ? t.tagName + '.' + (t.className || '').toString().slice(0, 22) : 'null';
+          }
+        }
+        // Does the control at least own its own box?
+        let selfOk = true;
+        const vIn = Math.max(2, r.height / 2 - 2), hIn = Math.max(2, r.width / 2 - 2);
+        for (const [x, y] of [[cx, cy - vIn], [cx, cy + vIn], [cx - hIn, cy], [cx + hIn, cy]]) {
+          const t = document.elementFromPoint(x, y);
+          if (!(t === e || e.contains(t))) selfOk = false;
+        }
+        const c = clipRect(e);
+        const fully = (!c || (r.top >= c.top - 0.5 && r.bottom <= c.bottom + 0.5)) &&
+                      r.top >= -0.5 && r.bottom <= innerHeight + 0.5 && r.left >= -0.5 && r.right <= innerWidth + 0.5;
+        return {label: (e.innerText || e.getAttribute('aria-label') || '').trim().slice(0, 12),
+                w: Math.round(r.width), h: Math.round(r.height), y: Math.round(r.y),
+                cx: Math.round(cx), cy: Math.round(cy), bottom: Math.round(r.bottom),
+                vTested, hTested, fully, selfOk,
+                pass: vPass && hPass && vTested >= 2 && hTested >= 2, missed};
+      };
+      const out = {};
+      for (const s of specs) {
+        let scope = document, missing = false;
+        if (s.scope === 'settings') { scope = settingsRoot(); if (!scope) missing = true; }
+        if (missing) { out[s.name] = null; continue; }
+        const els = s.suffix
+          ? [...scope.querySelectorAll('*')].filter(e => has(e, s.suffix))
+          : [...scope.querySelectorAll(s.sel)];
+        out[s.name] = els.map(test)
+          .filter(r => r.cx > 2 && r.cx < innerWidth - 2 && r.cy > 2 && r.cy < innerHeight - 2)
+          .filter(r => r.w > 1 && r.h > 1);
+      }
+      return out;
+    }"""
+
+    def probe(specs):
+        return pg.evaluate(PROBE, specs)
+
+    def bad(rows):
+        """Controls that are fully on screen but still not hittable."""
+        return [r for r in (rows or []) if r.get("fully") and not r["pass"]]
+
+    def too_short(rows, minimum=44):
+        """Every control must be at least `minimum` px in its shorter usable dimension."""
+        return [r for r in (rows or []) if min(r["w"], r["h"]) < minimum]
+
+    # --- open a conversation, with something tall enough to scroll ---------
+    pg.evaluate("() => window.dshMobileWeb.openDrawer()")
+    pg.wait_for_timeout(900)
+    pg.evaluate("""() => { for (const r of document.querySelectorAll('[class*="_projectRow"][aria-expanded="false"]')) r.click(); }""")
+    pg.wait_for_timeout(1200)
+    shot("02-drawer")
+    rows = pg.evaluate("""() => [...document.querySelectorAll('[class*="sessionRow"]')].map(r => {
+      const b = r.getBoundingClientRect();
+      return {x: b.x + b.width * 0.4, y: b.y + b.height / 2};
+    })""")
+    if rows:
+        pg.touchscreen.tap(rows[0]["x"], rows[0]["y"])
+        pg.wait_for_timeout(5000)
+    pg.evaluate("() => window.dshMobileWeb.closeDrawer()")
+    pg.wait_for_timeout(1400)
+    pg.evaluate("""() => {
+      const s = document.querySelector('[class*="_scrollBody"]');
+      if (!s) return;
+      if (s.scrollHeight <= s.clientHeight + 200) {
+        const pad = document.createElement('div');
+        pad.id = 'mw-scroll-fixture'; pad.style.height = '2000px';
+        s.insertBefore(pad, s.firstChild);
+      }
+      s.scrollTop = 0;      // known state: at the top, so the bar is showing
+    }""")
+    pg.wait_for_timeout(900)
+    shot("01-conversation")
+
+    bar = "() => { const e = document.querySelector('.dsh-mw-topbar'); if (!e) return null; const r = e.getBoundingClientRect(); return {y: Math.round(r.y), h: Math.round(r.height)}; }"
+    top = "() => { const s = document.querySelector('[class*=\"_scrollBody\"]'); return s ? Math.round(s.getBoundingClientRect().y) : null; }"
+
+    tb = pg.evaluate(bar)
+    rep.check(g, "the injected top bar is at most 44px tall",
+              bool(tb) and tb["h"] <= 44, f"{tb}")
+
+    # Our cost must not be confused with the app's own header height, which
+    # changes on its own while a session mounts (measured 0/36/40/44 across
+    # consecutive readings). Measure the offset the body sits below the app's
+    # own header instead, so the delta is exactly what this plugin adds.
+    comp = """() => {
+      const body = document.querySelector('[class*=\"_scrollBody\"]');
+      const head = document.querySelector('[class*=\"_headerBlank\"]') ||
+                   document.querySelector('[class*=\"_header\"]');
+      if (!body) return null;
+      const by = Math.round(body.getBoundingClientRect().y);
+      const hh = head ? Math.round(head.getBoundingClientRect().height) : 0;
+      return {by: by, hh: hh, ours: by - hh};
+    }"""
+    rest_top = pg.evaluate(comp)
+    head = pg.evaluate("""() => ({has: !!document.querySelector('[class*="_headerBlank"]'),
+      cls: document.documentElement.classList.contains('dsh-mw-headblank')})""")
+    rep.check(g, "the product's empty header strip is collapsed whenever it exists",
+              head["cls"] is True or not head["has"],
+              f"headerBlank present={head['has']}, collapsed={head['cls']}")
+    # What this plugin costs: measure the same screen with the plugin switched
+    # off. The product's own chrome (status row, tab strip) is not ours to
+    # remove, so only our contribution is asserted.
+    pg.evaluate("() => window.dshMobileWeb.disable()")
+    pg.wait_for_timeout(900)
+    without = pg.evaluate(comp)
+    pg.evaluate("() => window.dshMobileWeb.enable()")
+    pg.wait_for_timeout(900)
+    cost = (None if rest_top is None or without is None
+            else rest_top["ours"] - without["ours"])
+    rep.check(g, "the injected bar costs the conversation at most 44px",
+              cost is not None and cost <= 44,
+              f"with plugin {rest_top}, stock {without}, cost={cost}")
+
+    # --- scrolling must never take the navigation off the screen ----------
+    # An earlier revision tucked the bar away while the reader scrolled
+    # forward. Since the ☰ lives in that bar, a real phone reported it as
+    # "the sidebar keeps disappearing" — the bar now simply stays.
+    for _ in range(3):
+        swipe(195, 600, 250)
+    pg.wait_for_timeout(700)
+    still = pg.evaluate(bar)
+    rep.check(g, "reading forward never hides the bar or its navigation",
+              bool(still) and still["h"] >= 40 and still["y"] >= 0, f"{still}")
+    shot("03-conversation-scrolled")
+    for _ in range(2):
+        swipe(195, 250, 600)
+    pg.wait_for_timeout(700)
+    shown = pg.evaluate(bar)
+    rep.check(g, "the bar is still there after scrolling back up",
+              bool(shown) and shown["h"] >= 40 and shown["y"] >= 0, f"{shown}")
+
+    # --- controls that must be easy to hit --------------------------------
+    r = probe([
+        {"name": "topbar", "sel": ".dsh-mw-topbar button"},
+        {"name": "composer", "sel": '[data-slot="conversation.composer"] button, [data-slot="conversation.input.dock"] button'},
+    ])
+    rep.check(g, "top bar controls all have a 44px touch area",
+              r["topbar"] and not bad(r["topbar"]), f"{bad(r['topbar'])}")
+    # Controls flush against the bottom edge (the footer's turn/token readouts)
+    # have no room to expand: Android's gesture strip and the browser chrome own
+    # that band. Those only have to be hittable within their own box; everything
+    # with room must reach 44px.
+    comp = r["composer"] or []
+    roomy = [c for c in comp if c["bottom"] <= 844 - 40]
+    edge = [c for c in comp if c["bottom"] > 844 - 40]
+    rep.check(g, "composer controls are hittable across 44px and own their box",
+              roomy and not bad(roomy), f"failing={bad(roomy)[:4]} edge={len(edge)}")
+    rep.check(g, "footer readouts at the screen edge stay hittable in their own box",
+              not edge or all(c["selfOk"] for c in edge),
+              f"{[c['label'] for c in edge if not c['selfOk']]}")
+
+    pg.evaluate("() => window.dshMobileWeb.openDrawer()")
+    pg.wait_for_timeout(1000)
+    drawer = probe([{"name": "rows", "sel": '[class*="sessionRow"]'}])["rows"]
+    rep.check(g, "drawer session rows are a 44px touch area",
+              drawer and not bad(drawer), f"{bad(drawer)[:3]}")
+    pg.touchscreen.tap(195, 500)
+    pg.wait_for_timeout(1000)
+    rep.check(g, "tapping the scrim returns to the conversation",
+              pg.evaluate("""() => { const s = document.querySelector('.dsh-mw-scrim');
+                return !s || getComputedStyle(s).opacity === '0' || !s.isConnected; }"""),
+              "the scrim stayed up")
+
+    # --- navigation must never be losable ---------------------------------
+    # Reported from a real phone: a drawer state that got stuck (class set,
+    # nothing on screen) hid the bar, so there was no ☰ and no sidebar at all.
+    pg.evaluate("() => window.dshMobileWeb.openDrawer()")
+    pg.wait_for_timeout(1300)
+    opening = pg.evaluate(bar)
+    rep.check(g, "the bar stays visible while the drawer is open",
+              bool(opening) and opening["h"] >= 40 and opening["y"] >= 0,
+              f"bar={opening}")
+    stuck = pg.evaluate("""() => {
+      document.documentElement.classList.add('dsh-mw-drawer');
+      const b = document.querySelector('.dsh-mw-topbar');
+      return {vis: b ? getComputedStyle(b).visibility : null,
+              h: b ? Math.round(b.getBoundingClientRect().height) : 0};
+    }""")
+    rep.check(g, "a stuck drawer state still leaves the bar on screen",
+              stuck["vis"] == "visible" and stuck["h"] >= 40, f"{stuck}")
+    # ...and its first button still gets you out
+    box = pg.evaluate("""() => { const b = document.querySelector('.dsh-mw-topbar button');
+      const r = b.getBoundingClientRect(); return {x: r.x + r.width / 2, y: r.y + r.height / 2}; }""")
+    pg.touchscreen.tap(box["x"], box["y"])
+    pg.wait_for_timeout(1500)
+    opened = pg.evaluate("() => document.documentElement.classList.contains('dsh-mw-drawer')")
+    pg.touchscreen.tap(360, 500)          # scrim closes it again
+    pg.wait_for_timeout(1200)
+    rep.check(g, "the bar's first button toggles the drawer out of a stuck state",
+              opened is not None, f"drawer class after tap: {opened}")
+
+    # --- settings ---------------------------------------------------------
+    pg.click(".dsh-mw-topbar__settings")
+    pg.wait_for_timeout(2600)
+    pg.evaluate("""() => { const c = [...document.querySelectorAll('[class*="_overlay"]')]
+        .find(o => o.querySelector('[class*="_navCell"]'));
+      const body = c && c.querySelector('[class*="_content"]'); if (body) body.scrollTop = 0; }""")
+    pg.wait_for_timeout(600)
+    shot("04-settings-home")
+    rep.check(g, "settings covers the whole screen",
+              pg.evaluate("""() => [...document.querySelectorAll('[class*="_overlay"]')]
+                .some(o => { const p = o.querySelector('[class*="_panel"]'); if (!p) return false;
+                  const r = p.getBoundingClientRect();
+                  return r.width >= innerWidth - 1 && r.height >= innerHeight - 1; })"""),
+              "no full-screen settings panel")
+
+    sr = probe([
+        {"name": "pills", "scope": "settings", "suffix": "navCell"},
+        {"name": "buttons", "scope": "settings", "sel": "button"},
+        {"name": "pickers", "scope": "settings", "suffix": "selector"},
+        {"name": "arrows", "scope": "settings", "suffix": "arrows"},
+    ])
+    rep.check(g, "the settings panel is found and has controls",
+              bool(sr["pills"]) and bool(sr["buttons"]),
+              f"pills={sr['pills']} buttons={len(sr['buttons'] or [])}")
+    rep.check(g, "settings category pills are at least 44px tall",
+              sr["pills"] and not too_short(sr["pills"], 44),
+              f"{[(p['label'], p['h']) for p in too_short(sr['pills'], 44)]}")
+    rep.check(g, "settings category pills have a 44px touch area",
+              sr["pills"] and not bad(sr["pills"]), f"{bad(sr['pills'])[:3]}")
+    rep.check(g, "every button in settings has a 44px touch area",
+              sr["buttons"] and not bad(sr["buttons"]),
+              f"failing={[(b['label'], b['w'], b['h'], b['missed']) for b in bad(sr['buttons'])][:5]}")
+    rep.check(g, "settings pickers are at least 44px tall",
+              sr["pickers"] and not too_short(sr["pickers"], 44),
+              f"found={len(sr['pickers'] or [])} short={too_short(sr['pickers'], 44)[:2]}")
+    rep.check(g, "settings pickers have a 44px touch area",
+              sr["pickers"] and not bad(sr["pickers"]),
+              f"found={len(sr['pickers'] or [])} failing={bad(sr['pickers'])[:2]}")
+    rep.check(g, "settings row disclosure arrows have a 44px touch area",
+              sr["arrows"] and not bad(sr["arrows"]),
+              f"found={len(sr['arrows'] or [])} failing={bad(sr['arrows'])[:2]}")
+
+    rowmin = pg.evaluate("""() => {
+      const root = [...document.querySelectorAll('[class*="_overlay"]')]
+        .find(o => o.querySelector('[class*="_navCell"]'));
+      if (!root) return null;
+      const has = (e, s) => (e.className || '').toString().split(/\\s+/).some(c => c.endsWith('_' + s));
+      const rows = [...root.querySelectorAll('*')].filter(e => has(e, 'row'))
+        .map(e => e.getBoundingClientRect()).filter(r => r.height > 2 && r.width > 100);
+      return {count: rows.length, min: rows.length ? Math.round(Math.min(...rows.map(r => r.height))) : 0};
+    }""")
+    rep.check(g, "settings rows themselves are at least 44px tall",
+              rowmin and rowmin["count"] > 0 and rowmin["min"] >= 44, f"{rowmin}")
+
+    nav_before = pg.evaluate("""() => { const n = document.querySelector('[class*="_nav"]');
+      const s = n ? [...n.querySelectorAll('*')].find(e => e.scrollWidth > e.clientWidth + 20) : null;
+      return s ? Math.round(s.scrollLeft) : null; }""")
+    swipe_x(80, 330, 60)
+    swipe_x(80, 330, 60)
+    swipe_x(80, 330, 60)
+    nav_after = pg.evaluate("""() => { const n = document.querySelector('[class*="_nav"]');
+      const s = n ? [...n.querySelectorAll('*')].find(e => e.scrollWidth > e.clientWidth + 20) : null;
+      return s ? Math.round(s.scrollLeft) : null; }""")
+    rep.check(g, "the category row swipes sideways",
+              nav_before is not None and nav_after is not None and nav_after > nav_before,
+              f"scrollLeft {nav_before} -> {nav_after}")
+
+    # tap a category that is not the active one, then come back
+    active = pg.evaluate("""() => { const a = document.querySelector('[class*="_navCell"][class*="_active"]');
+      return a ? a.innerText.trim() : null; }""")
+    pills_now = pg.evaluate("""() => [...document.querySelectorAll('[class*="_navCell"]')].map(e => {
+      const r = e.getBoundingClientRect();
+      return {label: e.innerText.trim(), x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2)}; })
+      .filter(p => p.x > 8 && p.x < innerWidth - 8);""")
+    other = next((p for p in pills_now if p["label"] != (active or "")), None)
+    if other:
+        pg.touchscreen.tap(other["x"], other["y"])
+        pg.wait_for_timeout(1900)
+        shot("05-settings-section")
+        now = pg.evaluate("""() => { const a = document.querySelector('[class*="_navCell"][class*="_active"]');
+          return a ? a.innerText.trim() : null; }""")
+        rep.check(g, "tapping a category switches the settings content",
+                  now is not None and now != active, f"active pill: {active} -> {now}")
+
+    close = probe([{"name": "close", "scope": "settings", "suffix": "close"}])["close"]
+    rep.check(g, "the settings close button has a 44px touch area",
+              close and not bad(close), f"{bad(close)}")
+    pg.click('[class*="_overlay"] button[class*="_close"]')
+    pg.wait_for_timeout(1600)
+    rep.check(g, "closing settings comes back to the conversation",
+              bool(pg.evaluate(bar)) and not pg.evaluate("""() => [...document.querySelectorAll('[class*="_overlay"]')]
+                .some(o => { const p = o.querySelector('[class*="_panel"]'); if (!p) return false;
+                  const r = p.getBoundingClientRect(); return r.height >= innerHeight - 1 && r.width >= innerWidth - 1; })"""),
+              "settings is still open after close")
+    shot("06-back-in-conversation")
+
+    # --- what the design audit named --------------------------------------
+    ph = pg.evaluate("""() => {
+      const el = document.querySelector('[class*="placeholder"]');
+      if (!el) return null;
+      let bg = 'rgba(0, 0, 0, 0)', n = el;
+      while (n && (bg === 'rgba(0, 0, 0, 0)' || bg === 'transparent')) { bg = getComputedStyle(n).backgroundColor; n = n.parentElement; }
+      const f = (c) => c.match(/\\d+(\\.\\d+)?/g).map(Number).slice(0, 3);
+      const lin = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+      const lum = (c) => 0.2126 * lin(c[0]) + 0.7152 * lin(c[1]) + 0.0722 * lin(c[2]);
+      const a = lum(f(getComputedStyle(el).color)), b = lum(f(bg));
+      return {ratio: Math.round(((Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05)) * 100) / 100,
+              color: getComputedStyle(el).color, bg};
+    }""")
+    rep.check(g, "the composer placeholder meets WCAG AA contrast",
+              bool(ph) and ph["ratio"] >= 4.5, f"{ph}")
+
+    grid = pg.evaluate("""() => {
+      const bad = [];
+      for (const e of document.querySelectorAll('.dsh-mw-topbar, .dsh-mw-topbar *, .dsh-mw-recover, .dsh-mw-recover *')) {
+        const cs = getComputedStyle(e);
+        for (const p of ['paddingTop','paddingRight','paddingBottom','paddingLeft','marginTop','marginBottom','rowGap','columnGap']) {
+          const v = parseFloat(cs[p]);
+          if (v > 0 && Math.abs(v / 4 - Math.round(v / 4)) > 0.001)
+            bad.push({cls: (e.className || '').toString().slice(0, 22), p, v});
+        }
+      }
+      return bad.slice(0, 8);
+    }""")
+    rep.check(g, "injected spacing sits on the 4px grid", not grid, f"{grid}")
+
+    radii = pg.evaluate("""() => {
+      const set = new Set();
+      for (const e of document.querySelectorAll('.dsh-mw-topbar *, .dsh-mw-recover *')) {
+        const r = getComputedStyle(e).borderRadius;
+        if (r && r !== '0px') set.add(r.split(' ')[0]);
+      }
+      return [...set];
+    }""")
+    rep.check(g, "injected chrome uses at most two corner radii",
+              len(radii) <= 2, f"{radii}")
+
+    ctx.close()
+
+
+
+def run_style_loss(browser, url, rep):
+    """
+    The app's client-module loader deletes a plugin's <style> tags on HMR.
+
+    Read from the app's own loader (`@deepseek-ai/dsh-client-modules/lib/client.js`):
+
+        const claimStyles = (id) => {
+          for (const el of document.querySelectorAll("style:not([data-plugin])"))
+            el.setAttribute("data-plugin", id);
+          ...
+        };
+        function removeOwnedStyles(id) {
+          for (const el of document.querySelectorAll("style[data-plugin]"))
+            if (el.getAttribute("data-plugin") === id) el.remove();
+        }
+
+    `claimStyles` runs right after a factory materialises, so the stylesheet this
+    plugin injects is claimed for `dsh-mobile-web` — and `removeOwnedStyles` is
+    called on every hot reload of that plugin (`entries.reload` / `invalidate`),
+    which also drops the factory from the load cache so the factory runs again.
+
+    The factory returned early (`window.dshMobileWeb.__installed`) BEFORE
+    injecting the stylesheet, so the CSS never came back while the injected bar
+    stayed in the DOM: the page kept the stock desktop layout plus four
+    unstyled buttons at the end of <body> — reported from the phone as
+    "每天第一次进浏览器看都是这样", fixed by a manual refresh.
+
+    This group removes the stylesheet exactly the way the loader does and
+    asserts the plugin puts it back on its own, with the adaptation restored.
+    """
+    print("\n=== STYLE LOSS: an HMR reload must not leave the page unadapted ===")
+    g = "style"
+    ctx = browser.new_context(viewport={"width": 390, "height": 844},
+                              is_mobile=True, has_touch=True, locale="zh-CN")
+    pg = ctx.new_page()
+    pg.goto(url, wait_until="domcontentloaded", timeout=60000)
+    wait_plugin(pg)
+    pg.wait_for_timeout(1500)
+
+    # 1. the loader must be able to attribute the stylesheet to this plugin
+    tag = pg.evaluate("""() => {
+      const s = document.getElementById('dsh-mobile-web-style');
+      return s ? s.getAttribute('data-plugin') : null;
+    }""")
+    rep.check(g, "the stylesheet carries data-plugin so the loader owns it",
+              tag == "dsh-mobile-web", f"data-plugin={tag!r}")
+
+    # 2. remove exactly what removeOwnedStyles() removes
+    removed = pg.evaluate("""() => {
+      let n = 0;
+      for (const el of document.querySelectorAll('style[data-plugin]'))
+        if (el.getAttribute('data-plugin') === 'dsh-mobile-web') { el.remove(); n++; }
+      return n;
+    }""")
+    rep.check(g, "the loader-style removal really found our stylesheet",
+              removed >= 1, f"removed={removed}")
+
+    # 3. the plugin must heal itself, without a reload
+    healed = False
+    for _ in range(30):
+        st = pg.evaluate("""() => {
+          const s = document.getElementById('dsh-mobile-web-style');
+          return s ? s.textContent.length : -1;
+        }""")
+        if st > 1000:
+            healed = True
+            break
+        pg.wait_for_timeout(200)
+    rep.check(g, "the plugin restores its stylesheet by itself after an HMR reload",
+              healed, f"textContent length={st}")
+
+    # 4. and the adaptation is really back: the stock rail is hidden again
+    d = pg.evaluate("""() => {
+      const side = document.querySelector('[class*="_sidebarCol"]');
+      const bar = document.querySelector('.dsh-mw-topbar');
+      return {
+        sideW: side ? Math.round(side.getBoundingClientRect().width) : null,
+        sideVisibility: side ? getComputedStyle(side).visibility : null,
+        barCount: document.querySelectorAll('.dsh-mw-topbar').length,
+        barPos: bar ? getComputedStyle(bar).position : null,
+        barTop: bar ? Math.round(bar.getBoundingClientRect().top) : null,
+      };
+    }""")
+    rep.check(g, "the stock rail is gone again once the stylesheet is back",
+              d["sideW"] is not None and d["sideW"] <= 2 and d["sideVisibility"] == "hidden",
+              f"{d}")
+    rep.check(g, "the recovered stylesheet lands the bar back on the top edge",
+              d["barPos"] == "fixed" and d["barTop"] is not None and d["barTop"] <= 2,
+              f"{d}")
+    rep.check(g, "restoring the stylesheet does not inject a second bar",
+              d["barCount"] == 1, f"bars={d['barCount']}")
+
+    # 5. the same must hold when the stylesheet is emptied rather than removed
+    pg.evaluate("""() => {
+      const s = document.getElementById('dsh-mobile-web-style');
+      if (s) s.textContent = '';
+    }""")
+    again = False
+    for _ in range(30):
+        st2 = pg.evaluate("""() => {
+          const s = document.getElementById('dsh-mobile-web-style');
+          return s ? s.textContent.length : -1;
+        }""")
+        if st2 > 1000:
+            again = True
+            break
+        pg.wait_for_timeout(200)
+    rep.check(g, "an emptied stylesheet is refilled too", again, f"length={st2}")
+
+    ctx.close()
 
 
 def main():
@@ -1161,6 +2285,10 @@ def main():
         run_file_panel(b, args.url, rep)
         run_touch_extras(b, args.url, rep)
         run_question_card(b, args.url, rep)
+        run_recover(b, args.url, rep)
+        run_style_loss(b, args.url, rep)
+        run_autoload(b, args.url, rep)
+        run_uitouch(b, args.url, rep)
         run_workspaces(b, args.url, rep)
         run_locale(b, args.url, rep)
         run_desktop(b, args.url, rep, args.baseline)

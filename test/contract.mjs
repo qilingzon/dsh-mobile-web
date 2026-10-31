@@ -234,6 +234,63 @@ check('the app\'s 28px close control gets a 44px hit area',
 	/html\.dsh-mw-rightfull\s+\[class\*="_iconButton"\]::after/.test(css) &&
 	/inset:\s*-8px/.test(css))
 
+// ---------------------------------------------------------------------------
+// The page must be able to un-stick itself. The app reconnects its socket but
+// never reloads the document, so the plugin probes its own (no-store) document
+// for the server's current build and surfaces a one-tap reload.
+// ---------------------------------------------------------------------------
+check('the recovery probe asks for a fresh document (never a cached one)',
+	/cache:\s*'no-store'/.test(bundle) && /fetch\(location\.href/.test(bundle))
+check('the server\'s build is read from the boot payload',
+	/__DSH_BOOT__/.test(bundle) && /"rev"\\s\*:/.test(bundle))
+check('auto-reload is budgeted so a stale edge cannot loop the page',
+	/RECOVER_MAX\s*=\s*2/.test(bundle) && /dsh-mw-reload/.test(bundle) &&
+	/sessionStorage/.test(bundle))
+check('the recovery bar exists only in the mobile gate',
+	/\.dsh-mw-recover\s*\{/.test(css) && /dsh-mw-recover__go/.test(css) &&
+	/className = 'dsh-mw-recover'/.test(bundle))
+check('the watchdog only arms on a phone viewport',
+	/function startRecover\(\)[\s\S]{0,160}isMobileViewport\(\)/.test(bundle))
+
+// ---------------------------------------------------------------------------
+// Scrolling up must keep loading older messages. The app owns the paging; the
+// plugin only presses the app's own 「加载更早」control when the reader reaches
+// the top, and it must not spam that control or act while nobody is scrolling.
+// ---------------------------------------------------------------------------
+check('auto-load presses the app\'s own load-earlier control',
+	/'\[class\*="_older"\] button'/.test(bundle) ||
+	/"\[class\*=\\"_older\\"\] button"/.test(bundle))
+check('auto-load only fires while the reader is actually scrolling',
+	/AUTOLOAD_USER_MS/.test(bundle) && /touchmove/.test(bundle) && /wheel/.test(bundle))
+check('auto-load backs off when a batch loads nothing',
+	/AUTOLOAD_BACKOFF_MS/.test(bundle) && /AUTOLOAD_SETTLE_MS/.test(bundle))
+check('auto-load listens for scroll without blocking it',
+	/addEventListener\('scroll'[\s\S]{0,80}\{ capture: true, passive: true \}/.test(bundle))
+
+// ---------------------------------------------------------------------------
+// The app's client-module loader deletes a plugin's `<style data-plugin=...>`
+// tags on every hot reload and then re-runs the factory. The stylesheet must
+// therefore be injected BEFORE the idempotence guard, and kept alive: a guard
+// placed first swallowed the re-injection and left the page on the stock
+// desktop layout with four unstyled buttons at the end of <body>.
+// ---------------------------------------------------------------------------
+check('the stylesheet is injected before the idempotence guard',
+	(() => {
+		const inject = bundle.indexOf('ensureStyle();')
+		const guard = bundle.indexOf('__installed) return;')
+		return inject > -1 && guard > -1 && inject < guard
+	})())
+check('the stylesheet is tagged with the loader\'s own attribution attribute',
+	/styleEl\.setAttribute\('data-plugin', 'dsh-mobile-web'\)/.test(bundle))
+check('something re-attaches the stylesheet if it is detached or emptied',
+	/watchStyle\(\)/.test(bundle) &&
+	/new MutationObserver\(function \(\) \{\s*ensureStyle\(\);/.test(bundle) &&
+	/headObserver\.observe\(head, \{childList: true, subtree: true, characterData: true\}\)/.test(bundle))
+check('every sync re-asserts the stylesheet',
+	/function sync\(\) \{\s*(?:\/\*[\s\S]*?\*\/\s*)?ensureStyle\(\);/.test(bundle))
+check('disable() stops the re-assert, enable() resumes it',
+	/styleWanted = false/.test(bundle) && /styleWanted = true/.test(bundle))
+
 console.log(`\n${'='.repeat(62)}`)
 console.log(`TOTAL ${checks} checks, ${checks - failures} passed, ${failures} failed`)
 process.exit(failures ? 1 : 0)

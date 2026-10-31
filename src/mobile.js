@@ -17,9 +17,6 @@
 (function () {
 	'use strict';
 
-	// Idempotent: a hot reload or a second bundle instance must not double-bind.
-	if (window.dshMobileWeb && window.dshMobileWeb.__installed) return;
-
 	var VERSION = '1.0.0';
 
 	/** The mobile gate, kept in sync with the stylesheet by hand. */
@@ -33,15 +30,78 @@
 
 	/* ---------------------------------------------------------------- *
 	 * CSS injection                                                     *
-	 * ---------------------------------------------------------------- */
-	var styleEl = document.getElementById('dsh-mobile-web-style');
-	if (!styleEl) {
-		styleEl = document.createElement('style');
-		styleEl.id = 'dsh-mobile-web-style';
-		styleEl.setAttribute('data-dsh-plugin', 'dsh-mobile-web');
-		(document.head || root).appendChild(styleEl);
+	 * ---------------------------------------------------------------- *
+	 * Load-bearing ordering: this runs BEFORE the idempotence guard below,
+	 * and is re-runnable at any time.
+	 *
+	 * The app's client-module loader claims every untagged `<style>` right
+	 * after a factory materialises and deletes the claimed tags on each hot
+	 * reload of that plugin — then re-runs the factory
+	 * (`@deepseek-ai/dsh-client-modules/lib/client.js`):
+	 *
+	 *     const claimStyles = (id) => {
+	 *       for (const el of document.querySelectorAll("style:not([data-plugin])"))
+	 *         el.setAttribute("data-plugin", id);
+	 *     };
+	 *     function removeOwnedStyles(id) {
+	 *       for (const el of document.querySelectorAll("style[data-plugin]"))
+	 *         if (el.getAttribute("data-plugin") === id) el.remove();
+	 *     }
+	 *
+	 * With the guard first, a hot reload removed this stylesheet and the
+	 * re-run returned at the guard, so the CSS never came back while the
+	 * injected bar stayed in the DOM: the stock desktop layout plus four
+	 * unstyled buttons at the end of <body> — reported from a real phone as
+	 * "每天第一次进浏览器看都是这样", cured only by a manual refresh.
+	 * So: inject first, guard second, and keep the tag alive afterwards. */
+	var styleEl = null;
+	var styleWanted = true;
+	var headObserver = null;
+	var cssLen = cssText.length;
+
+	/** (Re)attach and refill the stylesheet. Safe to call at any time.
+	 *
+	 * The first branch is the hot path: this runs on every head mutation and on
+	 * every sync(), so the intact case costs two boolean reads and a number
+	 * compare — never a 43KB string comparison. */
+	function ensureStyle() {
+		if (!styleWanted) return;
+		if (styleEl && styleEl.isConnected && styleEl.textContent.length === cssLen) return;
+		/* A bundle that ran while `window.__DSH_MW_CSS__` was still empty can
+		   still heal itself: re-read the global instead of caching the miss. */
+		if (!cssText) {
+			cssText = window.__DSH_MW_CSS__ || '';
+			cssLen = cssText.length;
+		}
+		var found;
+		if (!styleEl || !styleEl.isConnected) {
+			found = document.getElementById('dsh-mobile-web-style');
+			styleEl = found || document.createElement('style');
+			styleEl.id = 'dsh-mobile-web-style';
+			/* `data-plugin` is the loader's own attribution attribute: setting it
+			   ourselves keeps the tag ours instead of letting whichever plugin
+			   materialises next claim it (and then delete it on its own reload). */
+			styleEl.setAttribute('data-plugin', 'dsh-mobile-web');
+			styleEl.setAttribute('data-dsh-plugin', 'dsh-mobile-web');
+		}
+		if (!styleEl.isConnected) (document.head || root).appendChild(styleEl);
+		if (cssText && styleEl.textContent !== cssText) styleEl.textContent = cssText;
 	}
-	if (cssText && styleEl.textContent !== cssText) styleEl.textContent = cssText;
+
+	ensureStyle();
+
+	/** Put the stylesheet back if anything detaches or empties it. */
+	function watchStyle() {
+		if (headObserver || typeof window.MutationObserver !== 'function') return;
+		headObserver = new MutationObserver(function () {
+			ensureStyle();
+		});
+		var head = document.head || root;
+		headObserver.observe(head, {childList: true, subtree: true, characterData: true});
+	}
+
+	// Idempotent: a hot reload or a second bundle instance must not double-bind.
+	if (window.dshMobileWeb && window.dshMobileWeb.__installed) return;
 
 	/* ---------------------------------------------------------------- *
 	 * Viewport meta                                                     *
@@ -139,9 +199,9 @@
 		var side = document.querySelector('[class*="_sidebarCol"]');
 		var roots = side ? [side, document] : [document];
 		var list = CONTROLS[kind] || [];
-		for (var i = 0; i < roots.length; i++) {
-			for (var j = 0; j < list.length; j++) {
-				var el = roots[i].querySelector(list[j]);
+		for (let i = 0; i < roots.length; i++) {
+			for (let j = 0; j < list.length; j++) {
+				const el = roots[i].querySelector(list[j]);
 				if (el && !el.closest('.dsh-mw-topbar')) return el;
 			}
 		}
@@ -206,7 +266,7 @@
 			// address bar, on iOS the status-bar area. Created once, edited in
 			// place afterwards so a theme switch updates it rather than adding a
 			// second tag.
-			var meta = document.querySelector('meta[name="theme-color"]');
+			let meta = document.querySelector('meta[name="theme-color"]');
 			if (!meta) {
 				meta = document.createElement('meta');
 				meta.setAttribute('name', 'theme-color');
@@ -230,7 +290,7 @@
 	function isMobileViewport() {
 		try {
 			return window.matchMedia(MOBILE_QUERY).matches;
-		} catch (e) {
+		} catch {
 			return window.innerWidth <= 860;
 		}
 	}
@@ -277,6 +337,8 @@
 	}
 
 	function sync() {
+		/* The loader may have deleted the stylesheet since the last sync. */
+		ensureStyle();
 		if (!isMobileViewport()) {
 			// Leaving the gate: hand the layout back to the app untouched.
 			root.classList.remove('dsh-mw-drawer', 'dsh-mw-right');
@@ -287,6 +349,12 @@
 		ensureScrim();
 		ensureTopbar();
 		syncSurface();
+		// A viewport can cross the gate (rotation, window resize), so arming the
+		// watchdog here — not only at start() — keeps it alive. Idempotent.
+		startRecover();
+		startAutoload();
+		syncHeadBlank();
+		markSmallTargets();
 
 		// Read tracks once — readSidebarOpen() also calls readTracks(),
 		// so passing the result avoids a redundant regex scan per frame.
@@ -320,14 +388,14 @@
 		try {
 			history.pushState({ dshMobileWeb: 'drawer' }, '');
 			pushedHistory = true;
-		} catch (e) { /* history may be unavailable in exotic embeds */ }
+		} catch { /* history may be unavailable in exotic embeds */ }
 	}
 
 	function onDrawerClosed() {
 		drawerOpen = false;
 		if (pushedHistory) {
 			pushedHistory = false;
-			try { history.back(); } catch (e) { /* ignore */ }
+			try { history.back(); } catch { /* ignore */ }
 		}
 	}
 
@@ -371,7 +439,7 @@
 
 	window.addEventListener('keydown', function (e) {
 		if (e.key === 'Escape') {
-			var diffPanel = document.querySelector('[data-diff-approval-panel]');
+			const diffPanel = document.querySelector('[data-diff-approval-panel]');
 			if (diffPanel) {
 				window.dispatchEvent(new CustomEvent('diff-approval:toggle-panel'));
 			}
@@ -587,7 +655,7 @@
 				clientY: y,
 				dataTransfer: dt || dragDT,
 			});
-		} catch (e) {
+		} catch {
 			return;
 		}
 		target.dispatchEvent(ev);
@@ -634,14 +702,14 @@
 			row.classList.remove('dsh-mw-pressing');
 			try {
 				dragDT = new DataTransfer();
-			} catch (err) {
+			} catch {
 				dragSrc = null;
 				return;
 			}
 			fireDrag('dragstart', row, pressAt.x, pressAt.y);
 			root.classList.add('dsh-mw-dragging');
 			if (navigator.vibrate) {
-				try { navigator.vibrate(15); } catch (err) { /* ignore */ }
+				try { navigator.vibrate(15); } catch { /* ignore */ }
 			}
 		}, PRESS_MS);
 	}
@@ -652,19 +720,19 @@
 			// long press.  25 px is generous enough for natural finger tremor
 			// on a touch screen while still distinguishing intent from scroll.
 			if (pressTimer && pressAt) {
-				var t0 = e.touches[0];
+				const t0 = e.touches[0];
 				if (Math.abs(t0.clientX - pressAt.x) > 25 ||
 					Math.abs(t0.clientY - pressAt.y) > 25) {
 					clearTimeout(pressTimer);
 					pressTimer = null;
-					var pressing = document.querySelector('.dsh-mw-pressing');
+					const pressing = document.querySelector('.dsh-mw-pressing');
 					if (pressing) pressing.classList.remove('dsh-mw-pressing');
 				}
 			}
 			// Swipe-to-open / swipe-to-close. One flip per gesture: the state is
 			// cleared as soon as it fires.
 			if (swipe) {
-				var intent = swipeIntent(e.touches[0]);
+				const intent = swipeIntent(e.touches[0]);
 				if (intent) {
 					if (swipe.open) {
 						if (intent.dx > OPEN_SWIPE_PX) {
@@ -720,7 +788,7 @@
 			observedFrame = next;
 			frame = next;
 			if (frameObserver) frameObserver.disconnect();
-			var syncRaf = false;
+			let syncRaf = false;
 			frameObserver = new MutationObserver(function () {
 				// rAF-debounce: collapse rapid attribute changes (sidebar
 				// animation, keyboard resize) into one sync per frame.
@@ -748,12 +816,14 @@
 		// otherwise there is a frame with neither rail nor top bar.
 		root.classList.add('dsh-mw-on');
 		root.setAttribute('data-dsh-mw', VERSION);
+		ensureStyle();
+		watchStyle();
 		syncViewportMeta();
 
 		bind();
 
 		if (window.MutationObserver && !domObserver) {
-			var findRaf = false;
+			let findRaf = false;
 			domObserver = new MutationObserver(function () {
 				// rAF-debounce: during streaming the app mutates the DOM
 				// hundreds of times per second; a single findFrame() per
@@ -773,7 +843,7 @@
 		// borrowed surface colour has to be re-read when that happens.
 		// rAF-debounce: getComputedStyle forces layout; once per frame is enough.
 		if (window.MutationObserver) {
-			var surfRaf = false;
+			let surfRaf = false;
 			new MutationObserver(function () {
 				if (!surfRaf) {
 					surfRaf = true;
@@ -794,8 +864,8 @@
 		if (window.visualViewport) {
 			// rAF-debounce: visualViewport fires at 60+ fps during keyboard
 			// animation; one syncKeyboard per frame is sufficient.
-			var kbRaf = false;
-			var scheduleKb = function () {
+			let kbRaf = false;
+			const scheduleKb = function () {
 				if (!kbRaf) {
 					kbRaf = true;
 					requestAnimationFrame(function () {
@@ -826,7 +896,341 @@
 		document.addEventListener('touchend', onTouchEnd, { passive: true });
 		document.addEventListener('touchcancel', onTouchEnd, { passive: true });
 
+		startRecover();
+		startAutoload();
 		sync();
+	}
+
+	/* ---------------------------------------------------------------- *
+	 * Recovery — a stuck page has to be able to un-stick itself.        *
+	 *                                                                   *
+	 * The app reconnects its socket with backoff but NEVER reloads the   *
+	 * document, so a page holding a stale bundle or a dead connection    *
+	 * stays stuck until the user force-refreshes by hand. The document   *
+	 * is `cache-control: no-store`, ~39KB, and carries                   *
+	 * `window.__DSH_BOOT__.rev` — the revision of the plugin set the     *
+	 * server is serving right now. So one cheap, uncached fetch of our   *
+	 * own document answers both questions: "can I still reach the        *
+	 * server?" and "is this build still the current one?".               *
+	 * ---------------------------------------------------------------- */
+	var RECOVER_MS = 60000;          // probe cadence
+	var RECOVER_IDLE_MS = 20000;     // no input for this long counts as idle
+	var RECOVER_WINDOW_MS = 300000;  // auto-reload budget window
+	var RECOVER_MAX = 2;             // …and at most this many reloads in it
+	var recoverTimer = null;
+	var recoverEl = null;
+	var recoverKind = '';
+	var recoverProbing = false;
+	var lastInputAt = Date.now();
+
+	function bootRev() {
+		try {
+			return (window.__DSH_BOOT__ && window.__DSH_BOOT__.rev) || '';
+		} catch (e) {
+			return '';
+		}
+	}
+
+	/** Never reload on top of text the user has typed but not sent. */
+	function composerHasText() {
+		var el = document.querySelector('textarea, [contenteditable="true"]');
+		if (!el) return false;
+		var v = el.value != null ? el.value : el.textContent;
+		return String(v || '').trim().length > 0;
+	}
+
+	function recoverIdle() {
+		return document.visibilityState === 'visible' &&
+			(Date.now() - lastInputAt) > RECOVER_IDLE_MS &&
+			!composerHasText();
+	}
+
+	/**
+	 * Reloads are budgeted across the reload itself (sessionStorage survives
+	 * it): if the edge keeps serving the old build, the page shows the bar
+	 * instead of looping forever. Without sessionStorage it never auto-reloads.
+	 */
+	function reloadBudgetLeft() {
+		var rec;
+		try {
+			rec = JSON.parse(sessionStorage.getItem('dsh-mw-reload') || 'null');
+			if (!rec || typeof rec.n !== 'number' || (Date.now() - rec.t) > RECOVER_WINDOW_MS) {
+				return RECOVER_MAX;
+			}
+			return RECOVER_MAX - rec.n;
+		} catch (e) {
+			return 0;
+		}
+	}
+
+	function noteReload() {
+		var rec, fresh;
+		try {
+			rec = JSON.parse(sessionStorage.getItem('dsh-mw-reload') || 'null');
+			fresh = rec && (Date.now() - rec.t) <= RECOVER_WINDOW_MS;
+			sessionStorage.setItem('dsh-mw-reload', JSON.stringify({
+				t: Date.now(),
+				n: fresh ? rec.n + 1 : 1,
+			}));
+		} catch (e) { /* private mode: bar only, never auto-reload */ }
+	}
+
+	function showRecover(kind) {
+		var label, go;
+		if (!isMobileViewport()) return;
+		if (recoverKind === kind && recoverEl && recoverEl.isConnected) return;
+		recoverKind = kind;
+		if (!recoverEl) {
+			recoverEl = document.createElement('div');
+			recoverEl.className = 'dsh-mw-recover';
+			recoverEl.setAttribute('role', 'status');
+			label = document.createElement('span');
+			label.className = 'dsh-mw-recover__text';
+			go = document.createElement('button');
+			go.type = 'button';
+			go.className = 'dsh-mw-recover__go';
+			go.textContent = '重新加载';
+			// Idempotent: tapping again just asks the browser again.
+			go.addEventListener('click', function () { location.reload(); });
+			recoverEl.appendChild(label);
+			recoverEl.appendChild(go);
+		}
+		recoverEl.querySelector('.dsh-mw-recover__text').textContent =
+			kind === 'offline' ? '连接已断开' : '有新版本可用';
+		(document.body || root).appendChild(recoverEl);
+	}
+
+	function hideRecover() {
+		recoverKind = '';
+		if (recoverEl && recoverEl.parentNode) recoverEl.parentNode.removeChild(recoverEl);
+	}
+
+	function probeRecover() {
+		if (!isMobileViewport() || recoverProbing) return;
+		recoverProbing = true;
+		var done = function (err, rev) {
+			recoverProbing = false;
+			if (err) {
+				// Unreachable: offer the reload, but never perform it — a reload
+				// with no network would just replace the page with an error.
+				showRecover('offline');
+				return;
+			}
+			var mine = bootRev();
+			if (!rev || !mine) { hideRecover(); return; }   // cannot tell → say nothing
+			if (rev === mine) { hideRecover(); return; }
+			if (recoverIdle() && reloadBudgetLeft() > 0) {
+				noteReload();
+				location.reload();
+				return;
+			}
+			showRecover('update');
+		};
+		try {
+			fetch(location.href, { cache: 'no-store', credentials: 'same-origin' })
+				.then(function (r) {
+					if (!r.ok) throw new Error('http ' + r.status);
+					return r.text();
+				})
+				.then(function (html) {
+					var m = /"rev"\s*:\s*"([A-Za-z0-9]+)"/.exec(html);
+					done(null, m ? m[1] : '');
+				})
+				.catch(function () { done(new Error('probe failed')); });
+		} catch (e) {
+			recoverProbing = false;
+			hideRecover();
+		}
+	}
+
+	function startRecover() {
+		if (recoverTimer || !isMobileViewport()) return;
+		lastInputAt = Date.now();
+		var markInput = function () { lastInputAt = Date.now(); };
+		['pointerdown', 'keydown', 'touchstart', 'input'].forEach(function (t) {
+			document.addEventListener(t, markInput, { passive: true, capture: true });
+		});
+		document.addEventListener('visibilitychange', function () {
+			if (document.visibilityState === 'visible') probeRecover();
+		});
+		window.addEventListener('online', probeRecover);
+		window.addEventListener('offline', function () { showRecover('offline'); });
+		recoverTimer = setInterval(probeRecover, RECOVER_MS);
+	}
+
+	function stopRecover() {
+		if (recoverTimer) { clearInterval(recoverTimer); recoverTimer = null; }
+		hideRecover();
+	}
+
+	/* ---------------------------------------------------------------- *
+	 * Auto-load older messages.                                         *
+	 *                                                                   *
+	 * The app renders its own 「加载更早」control at the top of the message *
+	 * list (`<hash>_older > button`) and anchors the reader's place when *
+	 * it prepends a batch. On touch the list simply stops at the top and *
+	 * the control is never pressed — measured: eight real swipes to the  *
+	 * top left scrollHeight at 1014px, unchanged. So all this has to do  *
+	 * is press the app's own control when the reader reaches the top; it *
+	 * never fetches anything itself.                                    *
+	 * ---------------------------------------------------------------- */
+	var AUTOLOAD_PX = 320;             // start the next batch before the edge
+	var AUTOLOAD_IDLE_MS = 260;        // ...but only once the finger has settled
+	var AUTOLOAD_SETTLE_MS = 1800;     // poll period while waiting for a batch
+	var AUTOLOAD_WAIT_TRIES = 75;      // ...up to ~30s for a very long conversation
+	var AUTOLOAD_SOFT_BACKOFF_MS = 3000; // short pause after a press that shows nothing
+	var AUTOLOAD_BACKOFF_MS = 12000;   // nothing grew → leave the control alone
+	var AUTOLOAD_USER_MS = 2500;       // only while the reader is really scrolling
+	var autoArmed = false;
+	var autoBusy = false;
+	var autoBackoff = null;            // WeakMap: scroller → retry-not-before
+	var autoLastBackoffUntil = 0;
+	var autoLastUserAt = 0;
+	var autoLoads = 0;
+	var autoGrew = false;
+	var autoSettleTimer = null;
+	var autoIdleTimer = null;
+	var autoWatch = null;
+	var autoBusyTimer = null;
+
+	function autoBackoffLeft(el) {
+		if (!autoBackoff) return 0;
+		return Math.max(0, (autoBackoff.get(el) || 0) - Date.now());
+	}
+
+	function autoBackoffSet(el, until) {
+		if (!autoBackoff) {
+			if (typeof WeakMap !== 'function') return;
+			autoBackoff = new WeakMap();
+		}
+		autoBackoff.set(el, until);
+		autoLastBackoffUntil = until;
+	}
+
+	function autoLoadNow(el) {
+		if (!isMobileViewport() || autoBusy) return;
+		if (el.scrollTop > AUTOLOAD_PX) return;
+		if (autoBackoffLeft(el) > 0) return;
+		// A scroll the app performed itself (anchoring a batch, restoring a
+		// position) must not pull in more history — only a real gesture may.
+		// That is also what stops an idle page at the top from draining the
+		// whole session in the background.
+		if ((Date.now() - autoLastUserAt) > AUTOLOAD_USER_MS) return;
+		var btn = el.querySelector('[class*="_older"] button');
+		if (!btn) return;                 // no earlier history → do nothing
+		autoBusy = true;
+		autoLoads++;
+		var before = el.scrollHeight;
+		var topBefore = el.scrollTop;
+		btn.click();
+		// Two clocks on purpose. The press guard is short, so a reader who keeps
+		// swiping is never blocked for long; the watch below is patient, because
+		// a batch on a very long conversation can take seconds to render and the
+		// anchoring fix must still run when it finally lands.
+		if (autoBusyTimer) clearTimeout(autoBusyTimer);
+		autoBusyTimer = setTimeout(function () {
+			autoBusy = false;
+			if (el.scrollHeight <= before) {
+				autoBackoffSet(el, Date.now() + AUTOLOAD_SOFT_BACKOFF_MS);
+			}
+		}, AUTOLOAD_SETTLE_MS);
+		// Watch for the batch instead of assuming how long it takes: on a long
+		// conversation the prepend was measured blocking the main thread for
+		// ~20s, and a fixed 1.8s timeout called that a failure while the content
+		// was still coming — then the batch landed un-anchored and the text under
+		// the reader's finger jumped. Once it does arrive, put the reader back
+		// where they were if the app did not.
+		if (autoWatch) { clearInterval(autoWatch); autoWatch = null; }
+		var tries = 0;
+		autoWatch = setInterval(function () {
+			var grew, drift;
+			tries++;
+			grew = el.scrollHeight - before;
+			if (!el.isConnected) {
+				clearInterval(autoWatch); autoWatch = null; autoBusy = false; return;
+			}
+			if (grew > 0) {
+				clearInterval(autoWatch); autoWatch = null;
+				autoBusy = false;
+				autoGrew = true;
+				autoBackoffSet(el, 0);          // the batch arrived after all
+				drift = el.scrollTop - topBefore;
+				if (grew > 8 && drift < grew / 2) el.scrollTop = topBefore + grew;
+			} else if (tries > AUTOLOAD_WAIT_TRIES) {
+				clearInterval(autoWatch); autoWatch = null;
+				autoBusy = false;
+				autoGrew = false;
+				autoBackoffSet(el, Date.now() + AUTOLOAD_BACKOFF_MS);
+			}
+		}, 400);
+	}
+
+	function autoLoadOnScroll(e) {
+		if (!isMobileViewport()) return;
+		var el = e.target;
+		if (!el || typeof el.scrollTop !== 'number') return;
+		if (el.scrollHeight <= el.clientHeight + 40) return;   // not a scroller
+		if (el.closest && el.closest('[class*="_overlay"]')) return;
+		if (el.scrollTop > AUTOLOAD_PX) return;
+		// Wait for the gesture to settle first. Prepending a batch is expensive
+		// (a measured one blocked the main thread for ~20s and inserted 4400px),
+		// and doing that under a moving finger is what read as the list
+		// "jittering". Loading while the finger is still keeps the anchor
+		// meaningful and the motion smooth.
+		if (autoIdleTimer) clearTimeout(autoIdleTimer);
+		autoIdleTimer = setTimeout(function () { autoLoadNow(el); }, AUTOLOAD_IDLE_MS);
+	}
+	/* The product's own header row is an empty strip above the transcript. The
+	   CSS collapses it only while this class marks it blank; a header with
+	   content keeps its place. */
+	function syncHeadBlank() {
+		var blank = !!document.querySelector('[class*="_headerBlank"]');
+		document.documentElement.classList.toggle('dsh-mw-headblank', blank);
+	}
+
+	/* Controls the app renders at 22-28px get a 44px thumb area. The CSS can
+	   cover the composer's own row; this covers whatever else other plugins drop
+	   into the composer area, and opens a clipping (non-scrolling) row when that
+	   is what hides the area. A real scroller is never touched. */
+	var markAt = 0;
+	function markSmallTargets(force) {
+		// Called from sync(), which runs once per animation frame while the app
+		// streams. Measuring every button that often is a forced layout per
+		// frame on a phone, so it runs at most twice a second.
+		var now = Date.now();
+		if (!force && now - markAt < 500) return;
+		markAt = now;
+		var els = document.querySelectorAll(
+			'[class*="_composerSeat"] button, [data-slot^="conversation.input."] button, ' +
+			'[data-slot="conversation.composer"] button, [class*="_composerStack"] button');
+		var el, r, n, hops, oy, i;
+		for (i = 0; i < els.length; i++) {
+			el = els[i];
+			r = el.getBoundingClientRect();
+			if (r.height < 1) continue;
+			if (r.height >= 44) { el.classList.remove('dsh-mw-tap'); continue; }
+			el.classList.add('dsh-mw-tap');
+			n = el.parentElement;
+			hops = 0;
+			while (n && n !== document.body && hops++ < 4) {
+				oy = getComputedStyle(n).overflowY;
+				if (oy === 'hidden' || oy === 'clip') { n.classList.add('dsh-mw-taprow'); break; }
+				if (oy === 'auto' || oy === 'scroll') break;   // never un-clip a scroller
+				n = n.parentElement;
+			}
+		}
+	}
+
+	function startAutoload() {
+		if (autoArmed || !isMobileViewport()) return;
+		autoArmed = true;
+		var markUser = function () { autoLastUserAt = Date.now(); };
+		['touchstart', 'touchmove', 'wheel'].forEach(function (t) {
+			document.addEventListener(t, markUser, { passive: true, capture: true });
+		});
+		// Scroll events do not bubble, but they can be captured on the
+		// document, so nothing has to be re-bound when the SPA swaps the list.
+		document.addEventListener('scroll', autoLoadOnScroll, { capture: true, passive: true });
 	}
 
 	/* ---------------------------------------------------------------- *
@@ -863,14 +1267,48 @@
 				hasTopbar: !!(topbar && topbar.isConnected),
 			};
 		},
+		/* Recovery, exposed so the suite can drive it without waiting 60s. */
+		probeRecover: probeRecover,
+		recoverState: function () {
+			return {
+				running: !!recoverTimer,
+				shown: recoverKind,
+				bootRev: bootRev(),
+				lastInputAgo: Date.now() - lastInputAt,
+				budgetLeft: reloadBudgetLeft(),
+			};
+		},
+		/* The bar never hides itself: `tucked` stays false, and the suite
+		   asserts exactly that. An earlier revision tucked it away while
+		   reading, which took the ☰ (and so the sidebar) off the screen —
+		   reported from a real phone. 44px is not worth losing navigation. */
+		barState: function () {
+			return {tucked: false, armed: false,
+				headBlank: document.documentElement.classList.contains('dsh-mw-headblank')};
+		},
+		/* Auto-load, exposed so the suite can assert the throttle honestly. */
+		autoLoadState: function () {
+			return {
+				armed: autoArmed,
+				loads: autoLoads,
+				grew: autoGrew,
+				busy: autoBusy,
+				backoffMs: Math.max(0, autoLastBackoffUntil - Date.now()),
+				lastUserAgo: autoLastUserAt ? Date.now() - autoLastUserAt : null,
+			};
+		},
 		disable: function () {
-			if (styleEl.parentNode) styleEl.parentNode.removeChild(styleEl);
+			stopRecover();
+			styleWanted = false;
+			if (styleEl && styleEl.parentNode) styleEl.parentNode.removeChild(styleEl);
 			if (topbar && topbar.parentNode) topbar.parentNode.removeChild(topbar);
 			root.classList.remove('dsh-mw-on', 'dsh-mw-drawer', 'dsh-mw-right');
 		},
 		enable: function () {
-			if (!styleEl.parentNode) (document.head || root).appendChild(styleEl);
+			styleWanted = true;
+			ensureStyle();
 			root.classList.add('dsh-mw-on');
+			startRecover();
 			sync();
 		},
 	};

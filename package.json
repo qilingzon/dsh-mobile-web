@@ -32,5 +32,8 @@
   "scripts": {
     "build": "node build.mjs"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.15"
+  }
 }
