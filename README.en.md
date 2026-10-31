@@ -1,140 +1,100 @@
-# dsh-mobile-web
+# dsh-mobile-web-pro
 
-Full mobile-web adaptation for the DeepSeek Harness console — **without ever touching the desktop layout**.
+[![license](https://img.shields.io/github/license/qilingzon/dsh-mobile-web.svg)](LICENSE)
+[![GitHub release](https://img.shields.io/github/v/release/qilingzon/dsh-mobile-web.svg)](https://github.com/qilingzon/dsh-mobile-web/releases)
+[![DSH](https://img.shields.io/badge/DeepSeek-Harness-blue)](https://github.com/deepseek-ai/DeepSeek-Harness)
 
-[English](README.en.md) | [简体中文](README.md)
+[English](README.en.md) | [中文](README.md)
 
-A DSH profile plugin: one host no-op plus one browser bundle that injects a gated stylesheet and a small behaviour layer. It patches no DSH source file.
+**DSH Mobile Web Flagship UI Plugin (Pro)** — Delivering native mobile interactions and comprehensive adaptation for DeepSeek Harness (DSH Web).
+
+Built upon a robust, battle-tested architecture, `dsh-mobile-web-pro` introduces smooth history pagination, DOM rendering acceleration for ultra-long sessions, full safe-area touch ergonomics, and fixes historical issues such as long-session lag, abrupt scroll jumping, text overlapping, and toolbar clipping.
 
 ---
 
-## 🚀 Quick Start & Installation
+## ✨ Key Features & Pro Enhancements
 
-Choose one of the following installation methods based on your deployment environment:
+### ⚡ 1. Smooth History Loading & DOM Acceleration
+* **Smooth History Auto-loading**: Automatically and smoothly triggers loading of earlier messages when scrolling near the top of the chat, removing the need to tap "load older" buttons manually.
+* **Momentum-aware Jump Prevention**: Completely eliminates abrupt scroll jumps during touch momentum. Cooperates with DSH's native `viewport.preserve()` scroll anchoring to maintain seamless visual continuity.
+* **DOM Rendering Acceleration**: Leverages `content-visibility: auto` on message elements, allowing thousands of historical turns to render on-demand and substantially reducing main-thread layout reflows.
 
-### Method 1: One-line Automated Install & Update (Recommended)
+### 🛡️ 2. Zero Regressions & Layout Integrity
+* **Zero Text Overlapping**: Enhances Markdown and table layouts. Tables automatically scroll horizontally with natural cell wrapping, preventing text collisions and viewport blowouts.
+* **Full Header & Toolbar Visibility**: Integrates smooth horizontal header scrolling, ensuring session titles, action buttons, and PTC/usage badges remain fully visible and clickable on narrow screens.
+* **Touch-friendly Session Row Actions**: Permanently displays the `⋯` action menu trigger on session items for mobile devices (which lack mouse hover), making renaming, forking, and archiving readily accessible.
 
-Run this single command on your DSH host server. It will automatically clone, build, mount to the `web` profile, and smoothly reload the service:
+### 📱 3. Native Mobile Gestures & Ergonomics
+* **Edge Swipe Drawer**: Swipe right from the left edge of the screen to smoothly reveal the workspace navigation drawer, complete with frosted backdrop scrim.
+* **Two-step Turn Rail Preview**: Touch turn markers on the right edge to preview message abstracts before confirming navigation, preventing accidental jumps.
+* **Comprehensive Safe Area Adaptation**: Full alignment with iPhone notches, Dynamic Island, home indicators, and Android cutouts.
+* **Dynamic Keyboard Height Alignment**: Uses `visualViewport` tracking to adjust frame height when the on-screen keyboard opens.
+* **Offline Recovery Pill**: Non-intrusive floating status indicator when offline, offering one-tap reconnection when network restores.
+
+---
+
+## 🎯 Breakpoints
+
+| Breakpoint | Mode | Description |
+|:---|:---|:---|
+| **≤ 1023px** | **Pro Mobile Mode** | Activates mobile gestures, drawer, history acceleration, and touch optimizations |
+| **≥ 1024px** | **Native Desktop Mode** | Zero intervention, retaining clean native desktop DSH experience |
+
+Strictly aligned with DSH's native `SIDEBAR_AUTO_COLLAPSE = 1024` threshold.
+
+---
+
+## 📦 Installation
+
+### Method 1: Git Clone (Recommended)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/qilingzon/dsh-mobile-web/main/install.sh | bash
+cd /workspace/.dsh/profiles/web/node_modules
+git clone https://github.com/qilingzon/dsh-mobile-web.git dsh-mobile-web-pro
+cd dsh-mobile-web-pro
+npm install
+npm run build
 ```
 
-> **Note**:
-> - First run performs a clean installation.
-> - Running this command again at any time performs a **zero-downtime update** to the latest release without dropping in-flight agent sessions.
+Enable in your DSH profile:
+```bash
+dsh plugin --profile web enable dsh-mobile-web-pro
+```
+Restart DSH to apply.
 
----
-
-### Method 2: Offline / Production Release Package (`.tgz`)
-
-For air-gapped servers or production setups where you prefer not to install build dependencies (node/esbuild), use the pre-built GitHub Release tarball:
-
-1. **Download Release Tarball**:
-   ```bash
-   wget https://github.com/qilingzon/dsh-mobile-web/releases/download/v1.0.0/dsh-mobile-web-1.0.0.tgz
-   ```
-
-2. **Install via DSH Plugin CLI**:
-   ```bash
-   dsh plugin --profile web add ./dsh-mobile-web-1.0.0.tgz
-   ```
-
-3. **Restart / Reload DSH**:
-   ```bash
-   pkill -f "dsh web" && nohup dsh web >/dev/null 2>&1 &
-   ```
-
----
-
-### Method 3: Developer Source Build
-
-If you are modifying CSS or contributing improvements:
-
-1. **Clone & Build**:
-   ```bash
-   git clone https://github.com/qilingzon/dsh-mobile-web.git
-   cd dsh-mobile-web
-   node build.mjs          # compiles src/ into lib/client.js
-   node test/contract.mjs  # executes 63 contract checks
-   ```
-
-2. **Mount to Profile**:
-   ```bash
-   dsh plugin --profile web add "file:$(pwd)"
-   mkdir -p ~/.dsh/profiles/web/node_modules/dsh-mobile-web
-   cp -a . ~/.dsh/profiles/web/node_modules/dsh-mobile-web/
-   ```
-
----
-
-## 📱 Mobile Usage & Navigation Guide
-
-This plugin is **strictly gated** to mobile viewports (`max-width: 860px`). When accessed from desktop monitors, the native console UI remains 100% untouched.
-
-When visiting from a mobile browser:
-
-1. **Drawer Navigation**:
-   - Tap the `☰` top-left icon to slide out the session drawer.
-   - Tap any session to switch immediately **without triggering the on-screen keyboard**.
-   - Tap outside the drawer to dismiss smoothly.
-
-2. **Wide Markdown Tables**:
-   - Comparison tables wrap cell text cleanly (`word-break: break-word`) to eliminate overlapping text.
-   - Swipe horizontally with touch to inspect wide tables without breaking the page width.
-
-3. **Modern Settings UI**:
-   - Redesigned into horizontal pill categories and clean cards.
-   - Swipe pills horizontally to switch tabs, and tap the floating circular close button at top-right to return.
-
-4. **Keyboard & Input Handling**:
-   - Inputs are normalized to 16px to prevent iOS Safari auto-zoom.
-   - The message input automatically floats above the soft keyboard.
-   - Tapping the `+` command button does not falsely trigger the keyboard.
-
----
-
-## 🗑️ Uninstallation
-
-To completely remove the mobile plugin and restore native layout:
+### Method 2: DSH CLI
 
 ```bash
-dsh plugin --profile web remove dsh-mobile-web
-pkill -f "dsh web" && nohup dsh web >/dev/null 2>&1 &
+dsh plugin --profile web add dsh-mobile-web-pro
 ```
 
 ---
 
-## The problem it solves
+## ⚙️ Configuration
 
-Measured on the stock console at a 390×844 phone viewport:
+In DSH Web: **Settings → Plugins → 移动端适配 (Pro)**:
 
-| Feature / Area | Stock | With dsh-mobile-web |
-|---|---|---|
-| Left navigation | fixed 56px icon rail eating 12% of screen width | **Gone** — content gets full width; actions move to top bar |
-| Content width (390px phone) | 334px | **390px** |
-| Sidebar when opened | Squeezed content to 110px | **Overlay drawer**; content width unchanged |
-| Markdown Tables | Text clipped/overlapping without wrap | Natural wrapping and smooth horizontal scrolling |
-| Settings panel | 188px nav + 154px squeezed content | Modern horizontal capsule pills + full-width cards |
-| Inputs under soft keyboard | Hidden behind keyboard | Automatically floats above keyboard |
-| Input font size | <16px (triggers iOS auto-zoom shift) | 16px (prevents auto-zoom) |
-| Tap targets | As small as 28px | **≥44px** touch targets (Apple HIG) |
+| Setting | Default | Description |
+|:---|:---:|:---|
+| `swipeEnabled` | `true` | Swipe right from left edge to open drawer |
+| `autoLoadEarlier` | `true` | Smooth auto-loading when scrolling near top |
+| `headerScroll` | `true` | Single-line horizontal scroll for header items |
+| `turnRail` | `true` | Turn navigator touch preview and navigation |
+| `pwaEnabled` | `true` | Progressive Web App offline caching & install |
+| `drawerRefresh` | `false` | Manual refresh button at bottom of sidebar |
+| `dshmarketNavFix` | `true` | Preserve settings navigation for third-party marketplace |
 
 ---
 
-## How it avoids conflicting with desktop
+## 🛠️ Build
 
-Three independent mechanisms, each asserted by the test suite:
+```bash
+npm install
+npm run build
+```
 
-1. **The gate.** Every declaration in `src/mobile.css` sits inside
-   `@media (max-width: 860px), ((max-height: 500px) and (pointer: coarse))`.
-   Above the gate the stylesheet contributes *nothing*. `test/contract.mjs`
-   proves this by walking the CSS at brace depth 0 and failing if any top-level
-   construct is not a `@media` — a stray rule cannot slip in unnoticed.
-2. **It does not drive the app's state machine.** Opening and closing the
-   sidebar is still the app's own toggle. The plugin only observes the app's
-   inline `grid-template-columns` and re-geometries the result.
-3. **Regression against a pre-install baseline.** `test/e2e.py` compares
-   sidebar width, content width and computed grid columns at 900/1024/1280/1440
-   against `before-metrics.json`, captured from the live console *before*
-   installation.
+---
+
+## 📄 License
+
+Licensed under the [MIT License](LICENSE).

@@ -1,9 +1,4 @@
-# dsh-mobile-web — profile layer contribution.
-#
-# The host half is a deliberate no-op: all of the work happens in the browser
-# bundle, which is discovered from package.json's `dsh.client` declaration
-# (exports["./client"]), not from this patch. This patch exists only so that
-# installing the package makes it a layer in `dsh.profile.bundles`.
+# dsh-mobile-web-pro bundle patch.
 - insert:
-    - id: mobile-web
-      name: dsh-mobile-web
+    - id: dsh-mobile-web-pro
+      name: dsh-mobile-web-pro
