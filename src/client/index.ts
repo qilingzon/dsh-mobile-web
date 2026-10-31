@@ -280,3 +280,4 @@ const factory = (require: (spec: string) => unknown): Record<string, unknown> =>
 // 注册主 ID 以及兼容 ID，确保任何引用方式都能被 Cordis ModuleLoader 成功装载
 window.__ModuleLoader__.load({ id: 'dsh-mobile-web-pro', factory })
 window.__ModuleLoader__.load({ id: 'dsh-mobile-web', factory })
+window.__ModuleLoader__.load({ id: 'dsh-mobile-xc', factory })
