@@ -120,25 +120,38 @@ export function createDrawerChromeTask(toggleSidebar: () => void): ReconcilerTas
       const f = findFrame()
       frame = f
       if (f === null) return
-      if (ham === null) {
-        const b = document.createElement('button')
-        b.type = 'button'
-        b.className = 'dsh-xc-ham'
-        b.dataset.mobileNav = 'ham'
-        b.setAttribute('aria-label', 'Toggle sidebar')
-        b.textContent = '\u2261'
-        b.addEventListener('click', onHamClick)
-        f.appendChild(b)
-        ham = b
+
+      // 若页面上已存在孤儿 ham/scrim（例如重复执行或旧实例残余），先清洗复用
+      if (ham === null || !ham.isConnected) {
+        const existingHam = f.querySelector<HTMLButtonElement>('.dsh-xc-ham')
+        if (existingHam !== null) {
+          ham = existingHam
+        } else {
+          const b = document.createElement('button')
+          b.type = 'button'
+          b.className = 'dsh-xc-ham'
+          b.dataset.mobileNav = 'ham'
+          b.setAttribute('aria-label', 'Toggle sidebar')
+          b.textContent = '\u2261'
+          b.addEventListener('click', onHamClick)
+          f.appendChild(b)
+          ham = b
+        }
       }
-      if (scrim === null) {
-        const s = document.createElement('div')
-        s.className = 'dsh-xc-scrim'
-        s.dataset.mobileNav = 'scrim'
-        s.setAttribute('aria-hidden', 'true')
-        s.addEventListener('click', onScrimClick)
-        f.appendChild(s)
-        scrim = s
+
+      if (scrim === null || !scrim.isConnected) {
+        const existingScrim = f.querySelector<HTMLDivElement>('.dsh-xc-scrim')
+        if (existingScrim !== null) {
+          scrim = existingScrim
+        } else {
+          const s = document.createElement('div')
+          s.className = 'dsh-xc-scrim'
+          s.dataset.mobileNav = 'scrim'
+          s.setAttribute('aria-hidden', 'true')
+          s.addEventListener('click', onScrimClick)
+          f.appendChild(s)
+          scrim = s
+        }
       }
       // 刷新按钮由配置 drawerRefresh 控制（默认隐藏；设置开启后即插即显）
       if (getConfig().drawerRefresh) {

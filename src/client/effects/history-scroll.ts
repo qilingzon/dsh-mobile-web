@@ -105,28 +105,6 @@ export function createHistoryScrollTask(): ReconcilerTask {
     scroller.addEventListener('touchstart', onTouchStart, { passive: true })
     scroller.addEventListener('touchend', onTouchEnd, { passive: true })
     scroller.addEventListener('touchcancel', onTouchEnd, { passive: true })
-
-    // 结合 IntersectionObserver 监听 older 按钮的可见性
-    if (typeof IntersectionObserver !== 'undefined') {
-      try {
-        io = new IntersectionObserver(
-          (entries) => {
-            for (const entry of entries) {
-              if (entry.isIntersecting) {
-                maybeTrigger()
-              }
-            }
-          },
-          { root: scroller, rootMargin: '100px 0px 0px 0px', threshold: 0.1 },
-        )
-        const btn = findOlderButton()
-        if (btn !== null && btn.parentElement !== null) {
-          io.observe(btn.parentElement)
-        }
-      } catch {
-        io = null
-      }
-    }
   }
 
   const unbind = (): void => {
