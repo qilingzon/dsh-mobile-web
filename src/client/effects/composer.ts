@@ -20,6 +20,8 @@ export function installComposerAutoCollapse(): () => void {
   if (typeof document === 'undefined') return NOOP
   const isComposerEl = (el: Element | null): boolean =>
     el !== null && el.closest('[data-slot^="conversation.composer"], [data-composer-seat]') !== null
+  let lastSubmitTime = 0
+
   const scheduleBlur = (): void => {
     window.setTimeout(() => {
       if (document.querySelector('[role="menu"], [role="dialog"]') !== null) return
@@ -34,11 +36,27 @@ export function installComposerAutoCollapse(): () => void {
   const onKeyDown = (event: KeyboardEvent): void => {
     if (event.key !== 'Enter' || event.shiftKey || event.isComposing) return
     if (!isComposerEl(event.target as Element | null)) return
+    const now = Date.now()
+    if (now - lastSubmitTime < 600) {
+      event.preventDefault()
+      event.stopImmediatePropagation()
+      return
+    }
+    lastSubmitTime = now
     scheduleBlur()
   }
   const onClick = (event: MouseEvent): void => {
     const target = event.target
-    if (target instanceof Element && target.closest('.uV2eYG_primary') !== null) scheduleBlur()
+    if (target instanceof Element && target.closest('.uV2eYG_primary') !== null) {
+      const now = Date.now()
+      if (now - lastSubmitTime < 600) {
+        event.preventDefault()
+        event.stopImmediatePropagation()
+        return
+      }
+      lastSubmitTime = now
+      scheduleBlur()
+    }
   }
   document.addEventListener('keydown', onKeyDown, true)
   document.addEventListener('click', onClick, true)

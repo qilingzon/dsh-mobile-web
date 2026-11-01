@@ -29,6 +29,7 @@ import { installPhoneChrome } from './effects/phone-chrome.ts'
 import { installComposerAutoCollapse } from './effects/composer.ts'
 import { installKeyboardInset } from './effects/keyboard.ts'
 import { installRecoverEffect } from './effects/recover.ts'
+import { installFileReaderGuard } from './effects/upload-guard.ts'
 
 interface ClientContext {
   effect<T>(fn: () => T | (() => void) | undefined, label?: string): void
@@ -239,6 +240,7 @@ const factory = (require: (spec: string) => unknown): Record<string, unknown> =>
     installMobileEffect(ctx, 'dsh-mobile-web-pro: focus guard', () => installFocusGuard())
     installMobileEffect(ctx, 'dsh-mobile-web-pro: composer auto-collapse', () => installComposerAutoCollapse())
     installMobileEffect(ctx, 'dsh-mobile-web-pro: keyboard inset', () => installKeyboardInset())
+    installMobileEffect(ctx, 'dsh-mobile-web-pro: file reader guard', () => installFileReaderGuard())
 
     // 5.1) 网络断开自愈微胶囊
     installMobileEffect(ctx, 'dsh-mobile-web-pro: recover banner', () => installRecoverEffect())
