@@ -19,7 +19,7 @@ const OLDER_BTN_SEL = '[class*="_older"] button'
 /** 触发阈值（距离顶部 px）*/
 const TOP_THRESHOLD_PX = 180
 /** 冷却防抖（ms）*/
-const COOLDOWN_MS = 1200
+const COOLDOWN_MS = 2000
 
 export function createHistoryScrollTask(): ReconcilerTask {
   let boundScroller: HTMLElement | null = null
@@ -27,6 +27,7 @@ export function createHistoryScrollTask(): ReconcilerTask {
   let lastTriggerTime = 0
   let checkTimer: number | null = null
   let io: IntersectionObserver | null = null
+  let lastScrollTop = 0
 
   const findScroller = (): HTMLElement | null => {
     const flow = document.querySelector<HTMLElement>('[data-chat-flow]')
@@ -74,13 +75,18 @@ export function createHistoryScrollTask(): ReconcilerTask {
     checkTimer = window.setTimeout(() => {
       checkTimer = null
       maybeTrigger()
-    }, 120)
+    }, 250)
   }
 
   const onScroll = (): void => {
     const scroller = boundScroller
     if (scroller === null) return
-    if (scroller.scrollTop <= TOP_THRESHOLD_PX) {
+    const currentTop = scroller.scrollTop
+    const isScrollingUp = currentTop < lastScrollTop
+    lastScrollTop = currentTop
+
+    // 只有当用户确实在往上滑（接近顶部），且位于顶部阈值内，才触发计划检测
+    if (currentTop <= TOP_THRESHOLD_PX && isScrollingUp) {
       scheduleCheck()
     }
   }

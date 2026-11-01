@@ -27,6 +27,7 @@ export function installComposerAutoCollapse(): () => void {
       if (!(active instanceof HTMLElement) || !isComposerEl(active)) return
       const input = active as HTMLTextAreaElement
       if (typeof input.value === 'string' && input.value.trim() !== '') return
+      if (typeof active.textContent === 'string' && active.textContent.trim() !== '') return
       active.blur()
     }, 220)
   }

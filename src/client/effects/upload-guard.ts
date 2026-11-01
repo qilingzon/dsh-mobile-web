@@ -95,10 +95,13 @@ export function createUploadGuardTask(): ReconcilerTask {
           input.setAttribute('accept', 'image/*,*/*')
         }
 
+        let isCompressing = false
+
         // 拦截 change 事件，在文件被交付给宿主 intakeFiles 之前进行防 OOM 下采样
         input.addEventListener(
           'change',
           (event) => {
+            if (isCompressing) return
             const files = input.files
             if (!files || files.length === 0) return
 
@@ -112,6 +115,7 @@ export function createUploadGuardTask(): ReconcilerTask {
             event.stopImmediatePropagation()
             event.preventDefault()
 
+            isCompressing = true
             const fileList = Array.from(files)
             Promise.all(fileList.map((f) => downsampleImage(f)))
               .then((safeFiles) => {
@@ -126,6 +130,9 @@ export function createUploadGuardTask(): ReconcilerTask {
               .catch((err) => {
                 console.warn('[dsh-mobile-web-pro] image compression failed, falling back to original:', err)
                 input.dispatchEvent(new Event('change', { bubbles: true }))
+              })
+              .finally(() => {
+                isCompressing = false
               })
           },
           true // 捕获阶段拦截

@@ -121,37 +121,44 @@ export function createDrawerChromeTask(toggleSidebar: () => void): ReconcilerTas
       frame = f
       if (f === null) return
 
-      // 若页面上已存在孤儿 ham/scrim（例如重复执行或旧实例残余），先清洗复用
-      if (ham === null || !ham.isConnected) {
-        const existingHam = f.querySelector<HTMLButtonElement>('.dsh-xc-ham')
-        if (existingHam !== null) {
-          ham = existingHam
-        } else {
-          const b = document.createElement('button')
-          b.type = 'button'
-          b.className = 'dsh-xc-ham'
-          b.dataset.mobileNav = 'ham'
-          b.setAttribute('aria-label', 'Toggle sidebar')
-          b.textContent = '\u2261'
-          b.addEventListener('click', onHamClick)
-          f.appendChild(b)
-          ham = b
+      // 清洗页面上可能存在的所有重复/孤儿 ham 与 scrim（确保全局唯一单例）
+      const allHams = Array.from(document.querySelectorAll<HTMLButtonElement>('.dsh-xc-ham'))
+      if (allHams.length > 0) {
+        ham = allHams[0]
+        ham.removeEventListener('click', onHamClick)
+        ham.addEventListener('click', onHamClick)
+        // 移除多余的重复汉堡按钮
+        for (let i = 1; i < allHams.length; i++) {
+          allHams[i].remove()
         }
+      } else {
+        const b = document.createElement('button')
+        b.type = 'button'
+        b.className = 'dsh-xc-ham'
+        b.dataset.mobileNav = 'ham'
+        b.setAttribute('aria-label', 'Toggle sidebar')
+        b.textContent = '\u2261'
+        b.addEventListener('click', onHamClick)
+        f.appendChild(b)
+        ham = b
       }
 
-      if (scrim === null || !scrim.isConnected) {
-        const existingScrim = f.querySelector<HTMLDivElement>('.dsh-xc-scrim')
-        if (existingScrim !== null) {
-          scrim = existingScrim
-        } else {
-          const s = document.createElement('div')
-          s.className = 'dsh-xc-scrim'
-          s.dataset.mobileNav = 'scrim'
-          s.setAttribute('aria-hidden', 'true')
-          s.addEventListener('click', onScrimClick)
-          f.appendChild(s)
-          scrim = s
+      const allScrims = Array.from(document.querySelectorAll<HTMLDivElement>('.dsh-xc-scrim'))
+      if (allScrims.length > 0) {
+        scrim = allScrims[0]
+        scrim.removeEventListener('click', onScrimClick)
+        scrim.addEventListener('click', onScrimClick)
+        for (let i = 1; i < allScrims.length; i++) {
+          allScrims[i].remove()
         }
+      } else {
+        const s = document.createElement('div')
+        s.className = 'dsh-xc-scrim'
+        s.dataset.mobileNav = 'scrim'
+        s.setAttribute('aria-hidden', 'true')
+        s.addEventListener('click', onScrimClick)
+        f.appendChild(s)
+        scrim = s
       }
       // 刷新按钮由配置 drawerRefresh 控制（默认隐藏；设置开启后即插即显）
       if (getConfig().drawerRefresh) {
