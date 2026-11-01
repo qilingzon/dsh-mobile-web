@@ -36,12 +36,10 @@ export function createHistoryScrollTask(): ReconcilerTask {
   let checkTimer: number | null = null
   let lastScrollTop = 0
 
-  // 滚动锚定强化守卫状态
+  // 滚动锚定强化守卫状态（基于绝对内容坐标系，杜绝用户滑动的相对位移误补偿）
   let isPagingActive = false
   let anchorEl: HTMLElement | null = null
-  let anchorInitialTop = 0
-  let scrollerInitialHeight = 0
-  let scrollerInitialScrollTop = 0
+  let anchorAbsoluteTop = 0
   let mo: MutationObserver | null = null
 
   const findScroller = (): HTMLElement | null => {
@@ -61,44 +59,59 @@ export function createHistoryScrollTask(): ReconcilerTask {
     return document.querySelector<HTMLButtonElement>(OLDER_BTN_SEL)
   }
 
-  /** 获取当前视口中最高的第一张可视消息卡片作为锚点 */
+  /** 获取当前视口中最高的第一张可视消息卡片作为锚点，记录其在可滚动内容绝对坐标系中的位置 */
   const captureAnchor = (scroller: HTMLElement): void => {
     const scrollerRect = scroller.getBoundingClientRect()
     const cards = Array.from(scroller.querySelectorAll<HTMLElement>('[data-chat-flow-key]'))
     for (const card of cards) {
       const rect = card.getBoundingClientRect()
-      // 找到第一张在视口顶部附近或下方可见的卡片
-      if (rect.bottom > scrollerRect.top + 20) {
+      // 找到第一张在视口内或紧邻视口上方的基准卡片
+      if (rect.bottom > scrollerRect.top) {
         anchorEl = card
-        anchorInitialTop = rect.top - scrollerRect.top
-        scrollerInitialHeight = scroller.scrollHeight
-        scrollerInitialScrollTop = scroller.scrollTop
+        // 关键：在内容绝对坐标系下记录位置 = 相对视口顶部的相对偏移 + 当前 scroller.scrollTop
+        anchorAbsoluteTop = (rect.top - scrollerRect.top) + scroller.scrollTop
+        lastCompensatedScrollTop = scroller.scrollTop
         return
       }
     }
     anchorEl = null
   }
 
-  /** 当历史消息插入导致顶部高度改变时，平稳对齐锚点 */
+  /** 上次观察到的 scrollTop，用于区分是用户自己滚动还是系统/外部补偿 */
+  let lastCompensatedScrollTop = 0
+
+  /** 当历史消息插入导致顶部新增 DOM 节点时，平稳对齐锚点 */
   const reconcileAnchor = (): void => {
     if (!isPagingActive || boundScroller === null || anchorEl === null) return
     if (!anchorEl.isConnected) {
-      // 锚点被替换，退出
+      // 锚点被替换或卸载，退出保护
       isPagingActive = false
       return
     }
 
     const scroller = boundScroller
     const scrollerRect = scroller.getBoundingClientRect()
-    const currentAnchorTop = anchorEl.getBoundingClientRect().top - scrollerRect.top
-    const drift = currentAnchorTop - anchorInitialTop
+    // 计算当前锚点在可滚动内容整体坐标系下的实际绝对位置
+    const currentAbsoluteTop = (anchorEl.getBoundingClientRect().top - scrollerRect.top) + scroller.scrollTop
+    // 真正的 DOM 插入前插总高度 = 当前绝对坐标 - 触发前锁定的基准绝对坐标
+    const prependHeight = currentAbsoluteTop - anchorAbsoluteTop
 
-    // 如果锚点卡片向下突跳了（说明顶部插入了新消息，高度增加了）
-    if (Math.abs(drift) > 2) {
-      // 补偿滚动的偏移量，消除突跳抖动
-      scroller.scrollTop += drift
-      // 补偿后重新记录基准
-      anchorInitialTop = anchorEl.getBoundingClientRect().top - scrollerRect.top
+    if (Math.abs(prependHeight) > 2) {
+      // 检查官方 ChatViewport 或外部是否已经补偿过 scrollTop：
+      // 官方如果调用了 preserve()，scroller.scrollTop 会自动增加 prependHeight
+      // 如果用户在这个瞬间快速滑动，或者官方在用户手势下调用了 stopPreserving() 放弃了补偿，
+      // 则未补偿的缺口 = prependHeight - (scroller.scrollTop - lastCompensatedScrollTop)
+      const alreadyAdjusted = scroller.scrollTop - lastCompensatedScrollTop
+      const uncompensatedGap = prependHeight - alreadyAdjusted
+
+      if (Math.abs(uncompensatedGap) > 2) {
+        // 精确补足官方放弃或尚未补偿的缺口，消除瞬间视觉跳动
+        scroller.scrollTop += uncompensatedGap
+      }
+
+      // 同步基准点与最新状态，防止多次 DOM mutation 重复累加
+      anchorAbsoluteTop = (anchorEl.getBoundingClientRect().top - scrollerRect.top) + scroller.scrollTop
+      lastCompensatedScrollTop = scroller.scrollTop
     }
   }
 
@@ -166,12 +179,7 @@ export function createHistoryScrollTask(): ReconcilerTask {
     const isScrollingUp = currentTop < lastScrollTop
     lastScrollTop = currentTop
 
-    // 如果当前正在加载且有锚定守卫，在滚动期间实时微调防抖
-    if (isPagingActive) {
-      reconcileAnchor()
-    }
-
-    // 检查按钮状态：如果加载已经完成，结束锚定
+    // 检查按钮状态：如果加载已经完成（或者按钮恢复启用/消失），结束锚定守卫
     const btn = findOlderButton()
     if (isPagingActive && (btn === null || !btn.disabled)) {
       stopAnchorGuard()
@@ -194,6 +202,17 @@ export function createHistoryScrollTask(): ReconcilerTask {
     }, 80)
   }
 
+  const onPointerDown = (e: Event): void => {
+    // 监听用户点击 Load earlier 按钮的动作，确保即使是手动点击也能启动防抖锚定守卫
+    const target = e.target as HTMLElement | null
+    if (target && target.closest(OLDER_BTN_SEL)) {
+      const scroller = boundScroller ?? findScroller()
+      if (scroller !== null) {
+        startAnchorGuard(scroller)
+      }
+    }
+  }
+
   const bind = (scroller: HTMLElement): void => {
     if (boundScroller === scroller) return
     unbind()
@@ -202,6 +221,7 @@ export function createHistoryScrollTask(): ReconcilerTask {
     scroller.addEventListener('touchstart', onTouchStart, { passive: true })
     scroller.addEventListener('touchend', onTouchEnd, { passive: true })
     scroller.addEventListener('touchcancel', onTouchEnd, { passive: true })
+    scroller.addEventListener('pointerdown', onPointerDown, { passive: true })
   }
 
   const unbind = (): void => {
@@ -210,6 +230,7 @@ export function createHistoryScrollTask(): ReconcilerTask {
       boundScroller.removeEventListener('touchstart', onTouchStart)
       boundScroller.removeEventListener('touchend', onTouchEnd)
       boundScroller.removeEventListener('touchcancel', onTouchEnd)
+      boundScroller.removeEventListener('pointerdown', onPointerDown)
       boundScroller = null
     }
     stopAnchorGuard()
