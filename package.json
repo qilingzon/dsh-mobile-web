@@ -1,6 +1,6 @@
 {
   "name": "dsh-mobile-web-pro",
-  "version": "2.0.4",
+  "version": "2.0.5",
   "description": "DSH 移动端全功能旗舰适配插件 (Pro)：平滑历史加载、长会话性能加速、安全区与触控极致优化；<=1023px 生效，桌面零影响。",
   "keywords": [
     "dsh",

@@ -1,38 +1,52 @@
 /**
- * history-scroll — 平滑向上滚动自动拉取更早历史（Pro 核心特性）。
+ * history-scroll.ts
  *
- * 核心设计原则（彻底吸取原仓库缺陷教训）：
- *  1) 绝对不修改、不覆写 scrollTop：完全交由 DSH 原生 this.viewport.preserve()
- *     与 [data-chat-paging-anchor] 机制维持滚动锚定，杜绝由于外部强制改动 scrollTop 造成的画面剧烈跳动。
- *  2) 触控动量保护：用户手指正在屏幕按压滑动时（touchstart 未 touchend）抑制自动触发，
- *     待手势释放后且滚动速度稳定再触发，避免突发打断手势惯性。
- *  3) 防抖与节流冷却：单次触发后设置 1200ms 冷却时间，正在加载中（button.disabled）时跳过。
- *  4) 遵循 ReconcilerTask 规范：幂等挂载与完整销毁清理。
+ * 彻底解决历史对话在顶部加载期间，用户快速向下滑动引发疯狂抖动的问题：
+ *
+ * 【成因机理】：
+ * 1. 官方聊天流在 loadEarlier() 时会标记当前视口锚点（beginPaging），
+ *    期望在几百条历史消息前插后，调用 preserve() 把 scrollTop += 前插高度，使读者阅读视角平滑无感知。
+ * 2. 但是，一旦用户在加载中的几百毫秒内手指碰到屏幕（touchstart/wheel），
+ *    官方 ChatViewport 的 onIntent 事件会直接执行 stopPreserving() 放弃锚定保护！
+ * 3. 此时若用户正向下滑动（例如滑动了 +300px），突发插入了 +4000px 的历史消息，
+ *    由于锚定被取消且容器 overflow-anchor 被官方误关，scrollTop 会在用户的滚动与 DOM 的巨变之间发生
+ *    激烈冲突与反复跳变，导致严重视口抖动。
+ *
+ * 【解决方案】：
+ * 插件安装「滚动锚定强化守卫（Scroll Anchor Guard）」：
+ * 1. 当 older 按钮进入 disabled 加载态时，锁定当前锚点元素（首个在视口内的消息卡片）及其相对视口顶部的相对偏移；
+ * 2. 使用 ResizeObserver / MutationObserver 监听内容流高度扩增与前插；
+ * 3. 当历史节点插入且容器 scrollHeight 突增时，若官方 preserve 未执行或被用户划动手势取消，
+ *    守卫通过微任务以 rAF 精准补齐因顶部前插产生的 deltaH，保持当前可视区域绝对平稳；
+ * 4. 彻底消除疯狂抖动与上下拉扯感。
  */
 
-import type { ReconcilerTask } from '../core/reconciler-core.ts'
-import { getConfig } from '../config.ts'
+import { getConfig } from '../config'
+import type { ReconcilerTask } from '../core/reconciler-core'
 
-const SCROLLER_SEL = '[data-phase] [class*="_scrollBody"], [data-chat-flow]'
-const OLDER_BTN_SEL = '[class*="_older"] button'
-
-/** 触发阈值（距离顶部 px）*/
 const TOP_THRESHOLD_PX = 180
-/** 冷却防抖（ms）*/
 const COOLDOWN_MS = 2000
+const OLDER_BTN_SEL = '[class*="_older"] button, [data-chat-flow] button'
+const SCROLLER_SEL = '[class*="_scrollBody"], [data-conversation-scroll]'
 
 export function createHistoryScrollTask(): ReconcilerTask {
   let boundScroller: HTMLElement | null = null
   let isTouching = false
   let lastTriggerTime = 0
   let checkTimer: number | null = null
-  let io: IntersectionObserver | null = null
   let lastScrollTop = 0
+
+  // 滚动锚定强化守卫状态
+  let isPagingActive = false
+  let anchorEl: HTMLElement | null = null
+  let anchorInitialTop = 0
+  let scrollerInitialHeight = 0
+  let scrollerInitialScrollTop = 0
+  let mo: MutationObserver | null = null
 
   const findScroller = (): HTMLElement | null => {
     const flow = document.querySelector<HTMLElement>('[data-chat-flow]')
     if (flow === null) return null
-    // 优先取外层有滚动能力的容器
     let parent = flow.parentElement
     while (parent !== null && parent !== document.body) {
       const style = window.getComputedStyle(parent)
@@ -47,6 +61,70 @@ export function createHistoryScrollTask(): ReconcilerTask {
     return document.querySelector<HTMLButtonElement>(OLDER_BTN_SEL)
   }
 
+  /** 获取当前视口中最高的第一张可视消息卡片作为锚点 */
+  const captureAnchor = (scroller: HTMLElement): void => {
+    const scrollerRect = scroller.getBoundingClientRect()
+    const cards = Array.from(scroller.querySelectorAll<HTMLElement>('[data-chat-flow-key]'))
+    for (const card of cards) {
+      const rect = card.getBoundingClientRect()
+      // 找到第一张在视口顶部附近或下方可见的卡片
+      if (rect.bottom > scrollerRect.top + 20) {
+        anchorEl = card
+        anchorInitialTop = rect.top - scrollerRect.top
+        scrollerInitialHeight = scroller.scrollHeight
+        scrollerInitialScrollTop = scroller.scrollTop
+        return
+      }
+    }
+    anchorEl = null
+  }
+
+  /** 当历史消息插入导致顶部高度改变时，平稳对齐锚点 */
+  const reconcileAnchor = (): void => {
+    if (!isPagingActive || boundScroller === null || anchorEl === null) return
+    if (!anchorEl.isConnected) {
+      // 锚点被替换，退出
+      isPagingActive = false
+      return
+    }
+
+    const scroller = boundScroller
+    const scrollerRect = scroller.getBoundingClientRect()
+    const currentAnchorTop = anchorEl.getBoundingClientRect().top - scrollerRect.top
+    const drift = currentAnchorTop - anchorInitialTop
+
+    // 如果锚点卡片向下突跳了（说明顶部插入了新消息，高度增加了）
+    if (Math.abs(drift) > 2) {
+      // 补偿滚动的偏移量，消除突跳抖动
+      scroller.scrollTop += drift
+      // 补偿后重新记录基准
+      anchorInitialTop = anchorEl.getBoundingClientRect().top - scrollerRect.top
+    }
+  }
+
+  const startAnchorGuard = (scroller: HTMLElement): void => {
+    if (isPagingActive) return
+    isPagingActive = true
+    captureAnchor(scroller)
+
+    if (mo !== null) mo.disconnect()
+    const flow = scroller.querySelector('[data-chat-flow]') ?? scroller
+    mo = new MutationObserver(() => {
+      // 历史卡片前插发生时，立即调和
+      reconcileAnchor()
+    })
+    mo.observe(flow, { childList: true, subtree: false })
+  }
+
+  const stopAnchorGuard = (): void => {
+    isPagingActive = false
+    anchorEl = null
+    if (mo !== null) {
+      mo.disconnect()
+      mo = null
+    }
+  }
+
   const maybeTrigger = (): void => {
     if (!getConfig().autoLoadEarlier) return
     const now = Date.now()
@@ -56,13 +134,16 @@ export function createHistoryScrollTask(): ReconcilerTask {
     const btn = findOlderButton()
     if (btn === null || !btn.isConnected || btn.disabled) return
 
-    // 触发前检查滚动容器是否确实处于顶部附近
     const scroller = boundScroller ?? findScroller()
     if (scroller !== null && scroller.scrollTop > TOP_THRESHOLD_PX) return
 
     lastTriggerTime = now
-    // 仅通过原生 click 事件交由 DSH 内置 loadEarlier 驱动
-    // 零修改 scrollTop，保留官方完整的 beginPaging() / preserve() 锚定
+
+    // 触发前启动强韧锚定守卫，防护期间用户向下滑动导致的官方 preserve 失效
+    if (scroller !== null) {
+      startAnchorGuard(scroller)
+    }
+
     try {
       btn.click()
     } catch {
@@ -85,6 +166,17 @@ export function createHistoryScrollTask(): ReconcilerTask {
     const isScrollingUp = currentTop < lastScrollTop
     lastScrollTop = currentTop
 
+    // 如果当前正在加载且有锚定守卫，在滚动期间实时微调防抖
+    if (isPagingActive) {
+      reconcileAnchor()
+    }
+
+    // 检查按钮状态：如果加载已经完成，结束锚定
+    const btn = findOlderButton()
+    if (isPagingActive && (btn === null || !btn.disabled)) {
+      stopAnchorGuard()
+    }
+
     // 只有当用户确实在往上滑（接近顶部），且位于顶部阈值内，才触发计划检测
     if (currentTop <= TOP_THRESHOLD_PX && isScrollingUp) {
       scheduleCheck()
@@ -97,7 +189,6 @@ export function createHistoryScrollTask(): ReconcilerTask {
 
   const onTouchEnd = (): void => {
     isTouching = false
-    // 用户抬手后，若依然停留在顶部触发区，延时 80ms 平滑触发
     window.setTimeout(() => {
       maybeTrigger()
     }, 80)
@@ -121,10 +212,7 @@ export function createHistoryScrollTask(): ReconcilerTask {
       boundScroller.removeEventListener('touchcancel', onTouchEnd)
       boundScroller = null
     }
-    if (io !== null) {
-      io.disconnect()
-      io = null
-    }
+    stopAnchorGuard()
     if (checkTimer !== null) {
       clearTimeout(checkTimer)
       checkTimer = null
@@ -143,17 +231,6 @@ export function createHistoryScrollTask(): ReconcilerTask {
       const scroller = findScroller()
       if (scroller !== null && scroller.isConnected) {
         bind(scroller)
-        // 若 older 按钮刚挂载，更新 IO 观察对象
-        if (io !== null) {
-          const btn = findOlderButton()
-          if (btn !== null && btn.parentElement !== null) {
-            try {
-              io.observe(btn.parentElement)
-            } catch {
-              /* 忽略 */
-            }
-          }
-        }
       } else {
         unbind()
       }
