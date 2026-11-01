@@ -55,7 +55,10 @@ const titleClass = 'dsh-xc-srow-title'
 const hintClass = 'dsh-xc-srow-hint'
 const swClass = 'dsh-xc-switch'
 
+let cardInstalled = false
 export function installXcPluginCard(ctx: unknown, react: Reactish): void {
+  if (cardInstalled) return
+  cardInstalled = true
   try {
     const face = ctx as CtxFace
     const slots = (face.slots ?? (typeof face.get === 'function' ? face.get('slots') : undefined)) as SlotsFace | undefined

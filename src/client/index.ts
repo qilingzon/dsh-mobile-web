@@ -271,13 +271,20 @@ const factory = (require: (spec: string) => unknown): Record<string, unknown> =>
     }
   }
 
-  exports.apply = apply
+  let applied = false
+  function safeApply(ctx: ClientContext): void {
+    if (applied) return
+    applied = true
+    apply(ctx)
+  }
+
+  exports.apply = safeApply
   exports.disablePwa = disablePwa
   exports.inject = ['slots', 'locale', 'configForms']
   return module.exports
 }
 
-// 注册主 ID 以及兼容 ID，确保任何引用方式都能被 Cordis ModuleLoader 成功装载
-window.__ModuleLoader__.load({ id: 'dsh-mobile-web-pro', factory })
-window.__ModuleLoader__.load({ id: 'dsh-mobile-web', factory })
-window.__ModuleLoader__.load({ id: 'dsh-mobile-xc', factory })
+// 注册插件
+if (typeof window !== 'undefined' && window.__ModuleLoader__?.load) {
+  try { window.__ModuleLoader__.load({ id: 'dsh-mobile-web-pro', factory }) } catch {}
+}
