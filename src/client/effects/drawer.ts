@@ -184,7 +184,7 @@ export function createDrawerChromeTask(toggleSidebar: () => void): ReconcilerTas
 }
 
 /** 抽屉内导航类条目的最小集合（避免把第三方新增入口纳入硬编码清单）。 */
-const NAV_SELECTOR = '[role="treeitem"], [class*="newSession"], [class*="searchResultRow"]'
+const NAV_SELECTOR = '[role="treeitem"], [class*="newSession"], [class*="searchResultRow"], [class*="panelRow"]'
 
 /**
  * 交互层（installMobileEffect 窄屏装配）：
@@ -205,7 +205,10 @@ export function installOverlayInteractions(ctx: EffectHost, toggleSidebar: () =>
       return f === null ? null : f.firstElementChild
     }
     const isNavTarget = (target: Element): boolean => {
-      if (target.closest('button') !== null) return false
+      const btn = target.closest('button')
+      // 如果点在普通按钮上（如折叠按钮、菜单按钮等），不是页面导航；
+      // 但如果是新建会话按钮或面板行按钮，属于导航目标
+      if (btn !== null && !btn.matches('[class*="newSession"], [class*="panelRow"]')) return false
       const row = target.closest(NAV_SELECTOR)
       if (row === null) return false
       // 可展开节点（工作区/文件夹，vendor 以 aria-expanded 标记）→ 不是导航：不自动关抽屉，让用户展开

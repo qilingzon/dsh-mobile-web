@@ -13,6 +13,7 @@ import { createSettingsPanelTask } from './settings-panel.ts'
 import { createHeaderScrollTask } from './header-scroll.ts'
 import { createTurnRailTask } from './rail-preview.ts'
 import { createHistoryScrollTask } from './history-scroll.ts'
+import { createUploadGuardTask } from './upload-guard.ts'
 
 export function registerDrawerTasks(core: ReconcilerCore, toggleSidebar: () => void): () => void {
   const removeMarker = core.register(createFrameMarkerTask())
@@ -34,6 +35,7 @@ export function registerCompatTasks(core: ReconcilerCore): () => void {
   const removeHeaderScroll = core.register(createHeaderScrollTask())
   const removeTurnRail = core.register(createTurnRailTask())
   const removeHistoryScroll = core.register(createHistoryScrollTask())
+  const removeUploadGuard = core.register(createUploadGuardTask())
   return () => {
     removeMarket()
     removeHideAdd()
@@ -41,5 +43,6 @@ export function registerCompatTasks(core: ReconcilerCore): () => void {
     removeHeaderScroll()
     removeTurnRail()
     removeHistoryScroll()
+    removeUploadGuard()
   }
 }
